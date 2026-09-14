@@ -1,13 +1,23 @@
 # 核心训练/推理环境（不含可视化与后处理包）
 #
 # 登录节点内存有限，勿直接 conda env create -f environment.yml（易 OOM）。
-# 推荐分步安装：
+# 推荐分步安装（新机器上没有 pytorch_downscale 环境时，按此重建）：
+#
 #   export CONDA_PKGS_DIRS="$HOME/.conda/pkgs"
-#   module load anaconda3/2023.09 && source "$(conda info --base)/etc/profile.d/conda.sh"
+#   # 若平台需要先 module load anaconda/conda，按平台约定加一行；
+#   # 若 conda/miniconda 已在 PATH 里（大多数容器镜像如此），跳过 module load。
+#   source "$(conda info --base)/etc/profile.d/conda.sh"
 #   conda create -n pytorch_downscale python=3.11 pip -y
 #   conda activate pytorch_downscale
+#   # NVIDIA CUDA 平台（如 A800）：
 #   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
-#   pip install numpy h5py netCDF4 -r requirements.txt
+#   pip install -r requirements.txt
+#
+#   # 装完务必验证：
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.device_count())"
+#   # torch.cuda.is_available() 必须是 True，否则检查驱动/CUDA 版本是否与 cu121 兼容
+#   # （A800 是 Ampere 架构，通常向下兼容 cu121；若报驱动版本过旧，换成平台推荐的
+#   #   torch 索引，例如 cu124/cu126，其余依赖不受影响）。
 #
 name: pytorch_downscale
 channels:

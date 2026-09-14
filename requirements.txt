@@ -1,8 +1,14 @@
-# 核心 pip 依赖（可视化/后处理包已移除，后续按需安装）
-# 安装顺序见下方注释
+# 核心 pip 依赖（可视化/后处理包已移除，按需自行追加）
+# 版本号取自当前 pytorch_downscale 环境（2026-09-14 记录，已跑通全部脚本），
+# 迁移到新机器时优先按这些版本装，遇到与新平台 CUDA 驱动不兼容再单独调整。
 #
-# 1) conda env create -f environment.yml && conda activate pytorch_downscale
+# 安装顺序：
+# 1) conda create -n pytorch_downscale python=3.11 pip -y && conda activate pytorch_downscale
 # 2) pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#    （NVIDIA CUDA 平台专用；ROCm/DCU 平台请用平台自带镜像，不要装这一行）
 # 3) pip install -r requirements.txt
 
+numpy==2.4.6
+h5py==3.16.0
+netCDF4==1.7.4
 tensorboard==2.20.0

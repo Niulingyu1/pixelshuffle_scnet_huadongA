@@ -1,0 +1,8 @@
+# 核心 pip 依赖（可视化/后处理包已移除，后续按需安装）
+# 安装顺序见下方注释
+#
+# 1) conda env create -f environment.yml && conda activate pytorch_downscale
+# 2) pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+# 3) pip install -r requirements.txt
+
+tensorboard==2.20.0

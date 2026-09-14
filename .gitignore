@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual / conda environments
+# 注意：项目自带的 env/activate.sh 等启动脚本需要保留，不能被下面的规则误伤
+.venv/
+venv/
+.conda/
+
+# Training outputs & logs
+runs/
+logs/
+*.log
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Data files
+*.h5
+*.hdf5
+*.nc
+smoke_test_data/
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cursor / SpecStory
+.specstory/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Crash dumps（例如 ROCm/HIP SIGSEGV 产生的巨大 core dump）
+core
+core.*

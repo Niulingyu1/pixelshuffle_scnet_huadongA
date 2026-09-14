@@ -1,0 +1,17 @@
+# 核心训练/推理环境（不含可视化与后处理包）
+#
+# 登录节点内存有限，勿直接 conda env create -f environment.yml（易 OOM）。
+# 推荐分步安装：
+#   export CONDA_PKGS_DIRS="$HOME/.conda/pkgs"
+#   module load anaconda3/2023.09 && source "$(conda info --base)/etc/profile.d/conda.sh"
+#   conda create -n pytorch_downscale python=3.11 pip -y
+#   conda activate pytorch_downscale
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#   pip install numpy h5py netCDF4 -r requirements.txt
+#
+name: pytorch_downscale
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip

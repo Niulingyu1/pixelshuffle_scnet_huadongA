@@ -104,101 +104,140 @@
 
 ## 4. 训练损失函数设计（`train.py`）
 
-训练阶段使用 `**CombinedLoss`**：在 **z-score 空间** 对 `pred` 与 `y_hr` 计算，由四项可加性组成（`TailWeightedMAE` 恒定参与，其余三项权重为 0 时自动关闭）；验证与早停仍只用 **纯 MAE**（`nn.L1Loss`），与历史实验的 `Loss/val` 口径一致（详见 4.5 节与本文档「验证损失应如何保存才符合标准」一节的完整论证）。
+训练阶段使用 `**CombinedLoss`**（v2，"参考目标 + 风光增量项"解耦设计，完整决策记录见
+`loss_plan/final_decision.md`）：在 **z-score 空间** 对 `pred` 与 `y_hr` 计算，由一个恒定
+参与的"参考目标"（面积加权 `TailWeightedMAE`）与若干可加性增量项组成（各增量项权重为 0
+时自动关闭）；验证与早停仍只用 **纯 MAE**（`nn.L1Loss`，像素等权），与历史实验的 `Loss/val`
+口径一致（详见 4.5 节与本文档「验证损失应如何保存才符合标准」一节的完整论证）。
 
-> **本节已按 `train.py` 当前代码同步更新**（此前版本仍描述纯 TailWeighted+FFT+Grad 三项、且默认打开 FFT/Grad 的旧设计，与代码已不一致，现予以修正）。
+> **本节已按 `train.py` v2 代码同步更新**（此前版本描述的是 v1：`TailWeightedMAE`+逐变量
+> 通道偏置权重+`SpatialExtremeLoss`+FFT/Grad 四项固定组合。v2 改为解耦设计：参考目标改为
+> 8 通道等权+面积加权，风光资源增强改由独立的 `PatchExtremeLoss`/`WindPowerSensitivityProxy`/
+> `PhysicalConsistencyLoss` 负责，不再依赖通道间的零和式偏置加权；旧版机制全部保留、默认
+> 关闭，供历史对照消融）。
 
 ### 4.1 总损失形式
 
 ```
-L_train = L_tail(γ, z_max, c)  +  λe · L_extreme  +  λf · L_FFT  +  λg · L_grad
+L_train = L_tail(γ, z_max, c, area_weight)
+        + λ_pe · L_patch_extreme
+        + λ_wps · L_wind_power_sensitivity
+        + λ_phys · L_phys_consistency
+        + [旧版，默认关闭] λe · L_extreme  +  λf · L_FFT  +  λg · L_grad
 ```
 
 其中：
-- `L_tail`：**尾部加权 MAE**（`TailWeightedMAE`），像素权重 `w = 1 + γ·clamp(|y|, 0, z_max)`，再逐通道乘以固定的**变量权重向量 c**（`--var_weights`）；
-- `L_extreme`：**区域空间极值一致性损失**（`SpatialExtremeLoss`），仅对 `--extreme_vars` 指定的通道，约束预测/目标在样本区域内的空间 max/min 一致；
-- `L_FFT`：2D 实数 FFT 幅度谱 L1（`FFTLoss`，**默认关闭**）；
-- `L_grad`：Sobel 空间梯度 L1（`GradientLoss`，**默认关闭**）。
+- `L_tail`：**参考目标**，面积加权尾部加权 MAE（`TailWeightedMAE`），像素权重
+  `w = 1 + γ·clamp(|y|, 0, z_max)`，再乘以逐通道固定权重向量 `c`（`--var_weights`，
+  **v2 默认全 1**，不做通道间偏置）与 `cos(latitude)` 球面积权重（`--no_area_weight`
+  可关闭）；
+- `L_patch_extreme`：**局部网格极值一致性损失**（`PatchExtremeLoss`），对
+  `--patch_extreme_vars` 指定通道，把 HR 场划分为局部网格块（默认 180×360），约束局部
+  max/min 与 patch 一阶矩（mean）一致；**不约束极值位置**，确定性回归下可能抬高整块；
+- `L_wind_power_sensitivity`：**风功率立方敏感区代理**（`WindPowerSensitivityProxy`），
+  仅对 `wind10`、仅在真值 3–12 m/s 内约束归一化功率代理；额定以上本项沉默；**不是**
+  能量产出对齐（10m 非轮毂高度、日均非瞬时）；
+- `L_phys_consistency`：**物理一致性安全网**（`PhysicalConsistencyLoss`），**先反标准化**
+  再约束温度顺序、非负性、RH 边界，再按训练期标准差无量纲化组合（禁止在 z 空间 hinge）；
+- `L_extreme`/`L_FFT`/`L_grad`：v1 旧版机制（全球极值 / FFT 幅度谱 / Sobel 梯度），
+  **v2 默认权重为 0**，仅保留供历史对照消融。
 
-**保底等价**：当 `--loss_gamma 0`、`--var_weights ""`、`--lambda_extreme 0`、`--lambda_freq 0`、`--lambda_grad 0` 时，`L_train` 与 `nn.L1Loss()` 完全等价。
+**保底等价**：当上述全部 λ 为 0、`--loss_gamma 0`、`--var_weights` 全 1、
+`--no_area_weight` 时，`L_train` 与 `nn.L1Loss()` 完全等价。这只保证损失函数**数值**
+的退化，不构成"训练出的模型在其余变量上必然不退步"的形式化证明——实际效果需看验证集结果。
 
 ### 4.2 各子项原理（与当前任务的关系）
 
 | 子项 | 含义 | 作用 |
 | --- | --- | --- |
-| **TailWeightedMAE**（含逐变量通道权重） | 像素权重 = z-score 尾部权重 × 固定通道权重 c | 尾部权重提升**极端值像素**（任意通道）的梯度贡献；通道权重让 `wind10`/`FSDS` 等特定变量在**全部像素**上获得更多梯度预算，二者独立叠加、互不冲突 |
-| **SpatialExtremeLoss** | 对 `--extreme_vars` 指定通道，约束预测/目标在 (H,W) 上的 max/min 一致 | 直接保护**区域极值**（风速极大值、辐照度晴空峰值/云遮骤降），逐像素 MAE 不保证极值不被抹平，此项针对性补足；仅影响 `--extreme_vars` 指定的通道 |
-| **FFTLoss** | `rfft2(..., norm="ortho")` 幅度谱 L1 | 抑制过平滑；**消融实验显示收益有限**，会拖累部分变量的逐点精度，默认关闭（`--lambda_freq` 可显式打开） |
-| **GradientLoss** | Sobel 梯度图 L1 | 强化锋面/地形陡坡等空间结构一致性；**消融实验显示其原始量级远大于 tail_w**，即使权重很小也会显著拖累 `TAS`/`2M_TMAX`/`2M_TMIN` 等连续变量精度，默认关闭 |
+| **TailWeightedMAE**（面积加权，v2 通道权重默认全 1） | 像素权重 = z-score 尾部权重 × 球面积权重（× 可选通道偏置，默认不启用） | 尾部权重提升**极端值像素**（任意通道）的梯度贡献；面积权重修正规则经纬网格在高纬度像素等权带来的面积高估；8 通道等权，不存在通道间零和式抢梯度 |
+| **PatchExtremeLoss** | 对指定通道划分局部网格，约束局部 max/min 与 patch **一阶矩**（mean） | 提高极值监督密度。patch-mean 抑制为凑 max 而整体平移的退化解，**不约束极值落点**，也不解决位置错位；确定性回归下降低 patch-max 的省力解往往是抬高整块，可能以 MAE/偏差换极值统计（`λ_p` 偏大时冒烟看 patch 均值偏差）。详见 `loss_plan/final_decision.md` 第 11.4、11.5 节 |
+| **WindPowerSensitivityProxy** | 仅 `wind10`，真值 3–12 m/s 内约束归一化功率代理（∝v³） | 只覆盖立方敏感区；**额定以上与切出区间本项沉默**，高风速由 tail + PatchExtreme 监督。日均 10m 风速大量落在该区间，mask 更可能过密。**不是**容量因子/发电量优化（10m、日均、Jensen 不等式）。冒烟必须看 `wps_mask_ratio` |
+| **PhysicalConsistencyLoss** | **先** `pred·σ+μ` 反标准化，再 hinge，再除 `σ_k` | 约束 `TMIN≤TAS≤TMAX`（K）、非负、`RH∈[0,100]`（%）；PRE 还原后是 log1p，`≥0` 仍等价于物理降水非负。**禁止在 z 空间直接比较或写 `ReLU(−z)`**。损失均值小不代表梯度贡献小 |
+| **[旧版] SpatialExtremeLoss** | 对 `--extreme_vars` 指定通道，约束预测/目标在整张全球样本上的 max/min 一致 | v1 机制，每张图每通道仅 2 个非零梯度像素，监督信号稀疏，已被 `PatchExtremeLoss` 取代为默认机制，默认权重 0，仅供对照 |
+| **FFTLoss** | `rfft2(..., norm="ortho")` 幅度谱 L1 | 抑制过平滑；消融实验显示收益有限，会拖累部分变量的逐点精度，默认关闭 |
+| **GradientLoss** | Sobel 梯度图 L1 | 强化锋面/地形陡坡等空间结构一致性；消融实验显示其原始量级远大于 tail_w，默认关闭 |
 
-**未纳入主损失、可作延伸阅读**：Huber / Charbonnier；纯分位数或 GEV 似然；Log-PSD。若后续要加，建议在 `CombinedLoss` 外单独做分支实验。
+**未纳入主损失、可作延伸阅读**：Huber / Charbonnier；纯分位数或 GEV 似然；Log-PSD；概率式
+CRPS。若后续要加，建议在 `CombinedLoss` 外单独做分支实验。
 
-### 4.3 命令行参数与默认值（与 `train.py` 当前代码一致）
+### 4.3 命令行参数与默认值（与 `train.py` v2 代码一致）
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--loss_gamma` | `0.5` | 尾部权重斜率 γ；`0` 时该项退化为普通 MAE。**作用于全部 8 个通道**，非逐变量 |
 | `--loss_z_max` | `3.0` | 权重中对 `abs(y)` 的截断上界（z-score），抑制极少数超大值主导梯度 |
-| `--var_weights` | `TAS=1.2,PRE=1.0,wind10=1.5,Q=1.0,2M_RH=1.2,2M_TMAX=1.0,2M_TMIN=1.0,FSDS=1.5` | `TailWeightedMAE` 的逐变量固定权重，与 z-score 尾部权重相乘叠加；默认已面向风光资源场景倾斜（`wind10`/`FSDS` 最高） |
-| `--extreme_vars` | `wind10,FSDS` | 参与 `SpatialExtremeLoss` 的变量；留空字符串关闭该损失 |
-| `--lambda_extreme` | `0.1` | λe；`0` 关闭 `SpatialExtremeLoss` |
-| `--lambda_freq` | `0.0`（**默认关闭**） | λf；非零显式打开 FFT 项 |
-| `--lambda_grad` | `0.0`（**默认关闭**） | λg；非零显式打开梯度项 |
+| `--var_weights` | `TAS=1.0,PRE=1.0,wind10=1.0,Q=1.0,2M_RH=1.0,2M_TMAX=1.0,2M_TMIN=1.0,FSDS=1.0` | `TailWeightedMAE` 的逐变量固定权重，与 z-score 尾部权重相乘叠加；**v2 默认全 1**（不做通道间偏置，风光增强改由下方独立增量项负责），仍可显式传入 v1 式偏置值用于对照消融 |
+| `--no_area_weight` | 关闭该标志时默认开启面积加权 | 关闭训练损失中的 `cos(latitude)` 球面积权重；仅影响训练损失，不影响 `Loss/val` |
+| `--extreme_vars` | `wind10,FSDS` | 参与旧版 `SpatialExtremeLoss` 的变量（v2 默认关闭，仅供对照） |
+| `--lambda_extreme` | `0.0`（v2 默认关闭） | λe；旧版全局极值损失权重，已被 `--lambda_patch_extreme` 取代为默认机制 |
+| `--patch_extreme_vars` | `wind10,FSDS` | 参与 `PatchExtremeLoss` 的变量；留空字符串关闭该损失 |
+| `--lambda_patch_extreme` | `0.1` | λ_pe；`0` 关闭 `PatchExtremeLoss` |
+| `--patch_grid_h` / `--patch_grid_w` | `180` / `360` | `PatchExtremeLoss` 局部网格大小，默认与 LR 输入网格同分辨率对齐 |
+| `--lambda_wps` | `0.05` | λ_wps；`0` 关闭 `WindPowerSensitivityProxy` |
+| `--wind_cutin` / `--wind_rated` | `3.0` / `12.0` | 功率代理曲线爬坡段边界（m/s，IEC 典型代理值，非机型标定值） |
+| `--lambda_phys` | `0.02` | λ_phys；`0` 关闭 `PhysicalConsistencyLoss` |
+| `--lambda_freq` | `0.0`（默认关闭） | λf；非零显式打开 FFT 项 |
+| `--lambda_grad` | `0.0`（默认关闭） | λg；非零显式打开梯度项 |
+| `--resource_vars` | `wind10,FSDS` | 用于计算 `best_resource.pt` 的 skill score（相对 LR 双线性插值 naive baseline），修复了旧版把不同物理量纲 MAE 直接算术平均的问题 |
 | `--val_extreme_z_thresh` | `1.5` | 验证集 `MAE_val_extreme/*` 的极端像素判定阈值（z-score） |
 
 ### 4.4 使用示例
 
-**默认（推荐起点：尾部加权 + 逐变量权重 + 风光资源区域极值，FFT/Grad 关闭）**：
+**默认（v2 推荐起点：面积加权尾部 MAE + PatchExtreme + WindPowerSensitivityProxy + PhysicalConsistency）**：
 
 ```bash
-python train.py --base_ch 256 --run_dir runs/exp_loss_default
+python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \
+  --run_dir runs/exp_loss_v2_default
 # 等价于显式写出：
-python train.py --base_ch 256 \
+python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \
   --loss_gamma 0.5 --loss_z_max 3.0 \
-  --var_weights "TAS=1.2,PRE=1.0,wind10=1.5,Q=1.0,2M_RH=1.2,2M_TMAX=1.0,2M_TMIN=1.0,FSDS=1.5" \
-  --extreme_vars wind10,FSDS --lambda_extreme 0.1 \
-  --lambda_freq 0.0 --lambda_grad 0.0 \
-  --run_dir runs/exp_loss_default
+  --var_weights "TAS=1.0,PRE=1.0,wind10=1.0,Q=1.0,2M_RH=1.0,2M_TMAX=1.0,2M_TMIN=1.0,FSDS=1.0" \
+  --patch_extreme_vars wind10,FSDS --lambda_patch_extreme 0.1 \
+  --lambda_wps 0.05 --wind_cutin 3.0 --wind_rated 12.0 \
+  --lambda_phys 0.02 \
+  --lambda_extreme 0.0 --lambda_freq 0.0 --lambda_grad 0.0 \
+  --run_dir runs/exp_loss_v2_default
 ```
 
-**与纯 MAE 完全一致（用于对照基线）**：
+**与纯 MAE 完全一致（用于对照基线，即已跑完的 `hr` 基线配置）**：
 
 ```bash
-python train.py --base_ch 256 \
-  --loss_gamma 0.0 --var_weights "" --lambda_extreme 0.0 \
+python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \
+  --loss_gamma 0.0 --var_weights "" --no_area_weight \
+  --lambda_extreme 0.0 --lambda_patch_extreme 0.0 --lambda_wps 0.0 --lambda_phys 0.0 \
   --lambda_freq 0.0 --lambda_grad 0.0 \
   --run_dir runs/exp_loss_pure_mae
 ```
 
-**加强风/光资源变量学习**（论证见下文「思考分析」第 1 部分）：
-
-```bash
-python train.py --base_ch 256 \
-  --var_weights "TAS=1.0,PRE=1.0,wind10=2.0,Q=1.0,2M_RH=1.0,2M_TMAX=1.0,2M_TMIN=1.0,FSDS=2.0" \
-  --extreme_vars wind10,FSDS --lambda_extreme 0.2 \
-  --run_dir runs/exp_loss_wind_solar_boost
-```
-
-**调权建议**：`--loss_gamma`/`--loss_z_max` 影响全部 8 个通道，调整前先看 `MAE_val/*` 是否整体健康；只想突出 `wind10`/`FSDS` 时优先调 `--var_weights`（逐通道、最不影响其它变量）和 `--lambda_extreme`（仅影响 `--extreme_vars` 指定通道），比调 `--loss_gamma` 更精准。若打开 `--lambda_freq`/`--lambda_grad`，注意二者原始量级较大，需从很小的值（如 0.01）开始配合 `Loss/freq`、`Loss/grad` 观察，避免拖累其余变量。
+**调权建议**：`--loss_gamma`/`--loss_z_max` 影响全部 8 个通道，调整前先看 `MAE_val/*` 是否
+整体健康；只想突出 `wind10`/`FSDS` 时优先调 `--lambda_patch_extreme`/`--lambda_wps`（仅影响
+指定通道），不建议再通过 `--var_weights` 做通道偏置。正式长跑前务必先按
+`loss_plan/final_decision.md` 第 4、11 节做一次数量级校验：损失值 ±3× **不能**代替梯度贡献
+可比；同时记录 `wps_mask_ratio`（可能过密）、wind10/FSDS 的 patch 均值偏差（是否整体抬升）。
+若覆盖率很高或均值系统性偏高，优先降 `λ_wps` / `λ_p`，不改损失结构。
 
 ### 4.5 TensorBoard 与验证口径
 
 | 标量 | 含义 |
 | --- | --- |
 | `Loss/train` | 每个日志步内，**组合损失**在若干 micro-batch 上的平均 |
-| `Loss/tail_w`、`Loss/spatial_extreme`、`Loss/freq`、`Loss/grad` | 各子项在未加权前的量级（每 `log_interval` 步记录一次均值） |
-| `Loss/val` | **仅纯 MAE**（z-score 空间），**唯一的**早停 / top-K checkpoint / `best.pt` 判据 |
-| `Loss/val_combined`、`Loss/val_tail_w`、`Loss/val_spatial_extreme`、`Loss/val_freq`、`Loss/val_grad` | 验证集上用**与训练相同**的 `CombinedLoss` 计算的完整组合损失及子项，仅用于诊断该 run 自身优化目标是否达成，**不参与**模型选择 |
-| `MAE_val/<变量>` | 反标准化后的逐变量 MAE（物理量纲；**注意 `PRE` 仍是 log1p(mm/day) 空间误差**，见下一行） |
+| `Loss/tail_w`、`Loss/patch_extreme`、`Loss/wps`、`Loss/phys`、`Loss/spatial_extreme`、`Loss/freq`、`Loss/grad` | 各子项在未加权前的量级（每 `log_interval` 步记录一次均值；后三项仅在对应旧版 λ>0 时出现） |
+| `Loss/val` | **仅纯 MAE**（z-score 空间，像素等权，不叠加面积权重），**唯一的**早停 / top-K checkpoint / `best.pt` 判据 |
+| `Loss/val_combined`、`Loss/val_tail_w` 等 | 验证集上用**与训练相同**的 `CombinedLoss` 计算的完整组合损失及子项，仅用于诊断该 run 自身优化目标是否达成，**不参与**模型选择 |
+| `MAE_val/<变量>` | 反标准化后的逐变量 MAE（物理量纲，像素等权；**注意 `PRE` 仍是 log1p(mm/day) 空间误差**，见下方） |
+| `MAE_val_area_weighted/<变量>` | 与训练损失一致的 `cos(latitude)` 面积加权 MAE 诊断，仅供论文报告，**不参与**模型选择 |
 | `MAE_val_physical/PRE` | `PRE` 通道额外做一次 `expm1` 还原后的真实 mm/day 量纲 MAE，是唯一真实物理量纲的降水误差指标 |
 | `MAE_val_extreme/<变量>`、`MAE_val_extreme/mean` | 仅 `abs(y_zscore) > --val_extreme_z_thresh` 的极端像素 MAE（物理量纲） |
+| `Skill_val/<变量>`、`Skill_val_resource/mean` | `--resource_vars` 指定变量相对"LR 双线性插值" naive baseline 的 skill score（`1 − MAE_model/MAE_baseline`），>0 优于该 baseline；`best_resource.pt` 按该均值最大时保存（修复了旧版把不同物理量纲 MAE 直接算术平均的问题） |
 
-**为什么 `Loss/val` 必须固定用纯 MAE，而不是训练用的组合损失**：见本文档下方「验证损失应如何保存才符合标准」一节的完整论证。
+**为什么 `Loss/val` 必须固定用像素等权的纯 MAE，而不是训练用的组合损失/面积加权版本**：见本文档下方「验证损失应如何保存才符合标准」一节的完整论证，以及 `loss_plan/final_decision.md` 中对该取舍的记录。
 
 ### 4.6 显存与数值注意
 
-- FFT 与 Sobel 在 **float32** 上计算，单步会临时占用较大显存（与全图 1801×3600、8 通道有关）；若 OOM，可先设 `--lambda_freq 0` 或 `--lambda_grad 0` 做二分排查（默认本就是关闭的）。
-- 实现见 `train.py` 中 `TailWeightedMAE`、`SpatialExtremeLoss`、`FFTLoss`、`GradientLoss`、`CombinedLoss`；`validate()` 内固定 `nn.L1Loss()` 作为 `Loss/val`，不受训练组合损失配置影响。
+- FFT、Sobel、`PatchExtremeLoss` 的 pooling 操作、`WindPowerSensitivityProxy`/`PhysicalConsistencyLoss` 的反标准化在 **float32** 上计算，单步会临时占用较大显存（与全图 1801×3600、8 通道有关）；若 OOM，可先关闭对应 λ 做二分排查。
+- 正式长跑前建议先做一次 1-epoch 小规模数据的数量级校验（见 `loss_plan/final_decision.md` 第 4、11 节）：损失值 ±3×、`wps_mask_ratio`、patch 均值偏差、`max_memory_allocated`；损失值接近不代表梯度贡献可比。
+- 实现见 `train.py` 中 `TailWeightedMAE`、`PatchExtremeLoss`、`WindPowerSensitivityProxy`、`PhysicalConsistencyLoss`（新增）、`SpatialExtremeLoss`、`FFTLoss`、`GradientLoss`（旧版保留）、`CombinedLoss`；`validate()` 内固定 `nn.L1Loss()` 作为 `Loss/val`，不受训练组合损失配置影响。已知表述边界（不改公式）：物理一致性必须先 denorm；WPS 不含额定以上高风速；patch-mean 不约束极值位置。
 
 ---
 
@@ -207,8 +246,8 @@ python train.py --base_ch 256 \
 
 | 项目         | 说明                                                                                                        |
 | ---------- | --------------------------------------------------------------------------------------------------------- |
-| 损失（训练）     | `CombinedLoss`：TailWeightedMAE + λf·FFT + λg·Gradient（见 **第 4 节**）；默认 γ=0.5、`loss_z_max`=3、λf=0.1、λg=0.05 |
-| 损失（验证）     | 始终 `nn.L1Loss`（MAE），z-score 空间；`Loss/val` 与早停以此为准                                                         |
+| 损失（训练）     | `CombinedLoss`（v2）：面积加权 TailWeightedMAE（参考目标）+ λ_pe·PatchExtreme + λ_wps·WindPowerSensitivityProxy + λ_phys·PhysicalConsistency（见 **第 4 节**）；默认 γ=0.5、`loss_z_max`=3、λ_pe=0.1、λ_wps=0.05、λ_phys=0.02；旧版 SpatialExtreme/FFT/Gradient 默认关闭，仅供对照 |
+| 损失（验证）     | 始终 `nn.L1Loss`（MAE），z-score 空间，像素等权；`Loss/val` 与早停以此为准                                                         |
 | 优化器        | `AdamW`，默认 `lr=2e-4`，`weight_decay=1e-4`                                                                  |
 | 学习率        | 线性 warmup：`warmup_start_ratio`（默认 **0.01**）→ **1.0**；再余弦至 `min_lr_ratio`（默认 **0.01**；可设 `0` 衰减到 0）        |
 | 梯度累积       | 默认 `accum_steps=2`                                                                                        |
@@ -467,7 +506,11 @@ CUDA_VISIBLE_DEVICES=0 conda run -n pytorch_downscale python /public/home/acd7ko
 
 正式训练确定：**不开 CBAM（`--no_cbam`）+ HR 辅助仅在 Stage1 注入（`--hr_aux_mode stage1`）+
 分布式训练（DDP）**，并叠加方案 A（调参）与方案 B（`--norm_type group` / `--ema_decay` /
-`--warmup_ratio`，见第 5.1a 节）。
+`--warmup_ratio`，见第 5.1a 节）。**损失函数已确定为第 4 节的 v2 方案**（面积加权
+`TailWeightedMAE` 参考目标 + `PatchExtremeLoss` + `WindPowerSensitivityProxy` +
+`PhysicalConsistencyLoss`，具体权衡见 `loss_plan/final_decision.md`）；下方命令未显式传入
+损失相关 CLI 参数，均按 `train.py` v2 默认值生效，等价于第 4.4 节的"v2 默认"示例命令。
+正式长跑前务必先完成 `loss_plan/final_decision.md` 第 4 节的一次性数量级校验。
 
 ```bash
 cd /public/home/acd7koea4a/work

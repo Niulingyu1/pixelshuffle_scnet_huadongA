@@ -25,7 +25,7 @@ PixelShuffleDownscaleNet 推理脚本。
   - 模型输入：x_lr（15通道）和 hr_aux（7通道）；模型输出为 z-score 空间下的 8 通道。
 
 正式数据集（CESM daily NetCDF）说明：
-  - 文件示例：/public/share/acd7koea4a/cesm/cesm_1deg_YYYYMMDD.nc（time=1, lat=180, lon=360）
+  - 文件示例：/root/data/cesm/cesm_1deg_YYYYMMDD.nc（time=1, lat=180, lon=360）
   - 变量示例：t2m/tmax/tmin/pr/fsds/wind10/rhmin/q
   - 注意：CESM 的 lat/lon 往往与训练静态 LR 网格（static/lat_lr.npy, static/lon_lr.npy）不一致，
     推理前需要先重网格到训练 LR 网格；脚本默认会做线性重网格（可用 --no_cesm_regrid 关闭）。
@@ -53,20 +53,13 @@ FSDS >= 0
 诊断：每次推理结束写 out_dir/diagnostics.json（输入越界比例、输出约束命中、
 温度顺序违反、min/max/mean/std 与逐日空间分位数均值）。
 
-坐标（经度）约定：
-  - NetCDF 输出的原生列顺序已核实与本仓库静态网格（static/lon_lr.npy、
-    static/lon_hr.npy，均为 -179.5..179.5 / -180..179.9）一致，即原生顺序
-    对应 lon=-180..180 单调索引。
-  - --lon_convention 默认 neg180_180：原样写出（不 roll），标注 lon -180..180；
-    如需 0..360，可传 --lon_convention pos0_360（内部按 W//2 滚动重排）。
 
 
-
-  CUDA_VISIBLE_DEVICES=1 conda run -n pytorch_downscale python /public/home/acd7koea4a/work/infer.py \
-  --ckpt /public/home/acd7koea4a/work/runs/exp01_no_cbam_hr_aux/checkpoints/best.pt \
-  --hdf5_root /public/share/acd7koea4a/hdf5_test \
+  CUDA_VISIBLE_DEVICES=1 conda run -n pytorch_downscale python /root/work4/infer.py \
+  --ckpt /root/work4/runs/exp01_no_cbam_hr_aux/checkpoints/best.pt \
+  --hdf5_root /root/data/hdf5_test \
   --seasons DJF \
-  --out_dir /public/home/acd7koea4a/work/infer_out_test_DJF_no_cbam_hr_aux \
+  --out_dir /root/data/infer_out_test_DJF_no_cbam_hr_aux \
   --output_mode per_sample \      # 输出模式，per_shard 表示每个输入分片生成一个输出文件（也可设为 per_sample，逐样本输出）
   --output_space physical \      # 输出空间，physical 表示解码成物理量（如实际单位），"zscore" 表示输出标准分，"denorm" 表示还原但不变单位
   --output_dtype float16 \       # 输出的数据类型，float16 为半精度浮点数，节省空间
@@ -75,60 +68,42 @@ FSDS >= 0
   --auto_model_cfg               # 自动从 checkpoint 跟踪的 config 恢复网络结构参数（无需手动输入 base_ch、resblocks 等）
 
 
-  python /public/home/acd7koea4a/work/infer.py \
-  --ckpt /public/home/acd7koea4a/work/runs/exp01_2_no_cbam_hr_1/checkpoints/best.pt \
-  --hdf5_root /public/share/acd7koea4a/hdf5_test \
-  --seasons DJF \
-  --date_start 20200101 --date_end 20201231 \
-  --out_dir /public/home/acd7koea4a/work/infer_out_test_2020_no_cbam_hr_1 \
-  --output_mode per_sample \
-  --output_space physical \
-  --output_dtype float16 \
-  --compression lzf \
-  --amp_bf16 \
-  --auto_model_cfg
-
-  CUDA_VISIBLE_DEVICES=2 conda run -n pytorch_downscale python /public/home/acd7koea4a/work/infer.py \
-  --ckpt /public/home/acd7koea4a/work/runs/exp01_2_no_cbam_hr_1/checkpoints/best.pt \
-  --hdf5_root /public/share/acd7koea4a/hdf5_test \
-  --out_dir /public/home/acd7koea4a/work/infer_out_test_nc_no_cbam_hr_1 \
+nohup python /work/home/nly_2026/work/infer.py \
+  --ckpt /work/home/nly_2026/work/runs/exp01_hr/checkpoints/best.pt \
+  --hdf5_root /public/share/acqmesjai0/nly/hdf5_cesm_1deg_no_mbc_fp32_sample \
+  --out_dir /work/home/nly_2026/work/infer_out_hr_cesm_no_mbc_fp32_sample \
   --output_mode per_sample \
   --output_format nc \
   --output_space physical \
+  --no_skip_bad_dates \
+  --output_dtype float32 \
   --amp_bf16 \
-  --auto_model_cfg
-
-CUDA_VISIBLE_DEVICES=0 nohup conda run -n pytorch_downscale python /public/home/acd7koea4a/work/infer.py \
-  --ckpt /public/home/acd7koea4a/work/runs/exp01_2_no_cbam_hr_1/checkpoints/best.pt \
-  --hdf5_root /public/share/acd7koea4a/hdf5_test \
-  --out_dir /public/home/acd7koea4a/work/infer_out_test_nc_no_cbam_hr_1 \
-  --output_mode per_sample \
-  --output_format nc \
-  --output_space physical \
-  --amp_bf16 \
-  --auto_model_cfg > infer_test_nc_no_cbam_hr_1.log 2>&1 & echo "作业PID: $!" >> infer_test_nc_no_cbam_hr_1.log
+  --q_output_unit gkg \
+  --auto_model_cfg \
+  --coord_ref_nc "/public/share/acqmesjai0/nly/cra_1801*3600_nc/obs_20000101.nc" \
+  > infer_hr_cesm_no_mbc_fp32.log 2>&1 & echo "作业PID: $!" >> infer_hr_cesm_no_mbc_fp32.log
 
 最好选择q单位为g/kg,否则很小的误差会导致效果很差
 
-  CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/acd7koea4a/work/infer.py \
-  --ckpt /public/home/acd7koea4a/work/runs/exp01_no_all/checkpoints/best.pt \
-  --hdf5_root /public/share/acd7koea4a/hdf5_test \
+  CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /root/work4/infer.py \
+  --ckpt /root/work4/runs/exp01_no_all/checkpoints/best.pt \
+  --hdf5_root /root/data/hdf5_test \
   --seasons DJF SON MAM JJA \
   --q_output_unit gkg \
   --date_start 20200101 --date_end 20240228 \
-  --out_dir /public/home/acd7koea4a/work/infer_out_test_no_all \
+  --out_dir /root/data/infer_out_test_no_all \
   --output_mode per_sample \
   --output_format nc \
   --output_space physical \
   --amp_bf16 \
   --auto_model_cfg > infer_test_no_all.log 2>&1 & echo "作业PID: $!" >> infer_test_no_all.log
 
-CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/acd7koea4a/work/infer.py \
-  --ckpt /public/home/acd7koea4a/work/runs/exp01_no_all/checkpoints/best.pt \
-  --hdf5_root /public/share/acd7koea4a/hdf5_test \
+CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /root/work4/infer.py \
+  --ckpt /root/work4/runs/exp01_no_all/checkpoints/best.pt \
+  --hdf5_root /root/data/hdf5_test \
   --seasons DJF \
   --date_start 20200101 --date_end 20240228 \
-  --out_dir /public/home/acd7koea4a/work/infer_out_test_no_all_no_physical_constraints \
+  --out_dir /root/data/infer_out_test_no_all_no_physical_constraints \
   --no_physical_constraints \
   --output_mode per_sample \
   --output_format nc \
@@ -138,18 +113,19 @@ CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/
 
 
   # 推荐 CESM 推理流程：先离线准备成 HDF5，再走与测试集一致的 HDF5 推理链路
-  conda run -n pytorch_downscale python /public/home/acd7koea4a/work/prepare_hdf5_cesm.py \
+  conda run -n pytorch_downscale python /root/work4/prepare_hdf5_cesm.py \
     --input_format nc \
-    --cesm_root /public/share/acd7koea4a/cesm \
-    --out_hdf5_root /public/share/acd7koea4a/hdf5_cesm \
+    --cesm_root /root/data/cesm \
+    --out_hdf5_root /root/data/hdf5_cesm \
     --date_start 20000101 --date_end 20000102
 
-  CUDA_VISIBLE_DEVICES=0 conda run -n pytorch_downscale python /public/home/acd7koea4a/work/infer.py \
+  CUDA_VISIBLE_DEVICES=0 conda run -n pytorch_downscale python /root/work4/infer.py \
     --input_source hdf5 \
-    --hdf5_root /public/share/acd7koea4a/hdf5_cesm_com \
+    --hdf5_root /root/data/hdf5_cesm_com \
     --seasons DJF MAM JJA SON\
-    --ckpt /public/home/acd7koea4a/work/runs/exp01_no_all/checkpoints/best.pt \
-    --out_dir /public/home/acd7koea4a/work/infer_out_cesm_com \
+    --ckpt /root/work4/runs/exp01_no_all/checkpoints/best.pt \
+    --out_dir /root/data/infer_out_cesm_com \
+    --no_skip_bad_dates \
     --output_mode per_sample \
     --output_format nc \
     --output_space physical \
@@ -157,24 +133,26 @@ CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/
     --auto_model_cfg
 
 物理约束：
- CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/acd7koea4a/work/infer.py \
+ CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /root/work4/infer.py \
   --input_source hdf5 \
-  --hdf5_root /public/share/acd7koea4a/hdf5_cesm \
+  --hdf5_root /root/data/hdf5_cesm \
   --seasons DJF MAM JJA SON \
-  --ckpt /public/home/acd7koea4a/work/runs/exp01_no_all/checkpoints/best.pt \
-  --out_dir /public/home/acd7koea4a/work/infer_out_cesm \
+  --ckpt /root/work4/runs/exp01_no_all/checkpoints/best.pt \
+  --out_dir /root/data/infer_out_cesm \
+  --no_skip_bad_dates \
   --output_mode per_sample \
   --output_format nc \
   --output_space physical \
   --amp_bf16 \
   --auto_model_cfg > infer_cesm_all.log 2>&1 & echo "PID: $!" >> infer_cesm_all.log
 
- CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/acd7koea4a/work/infer.py \
+ CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /root/work4/infer.py \
   --input_source hdf5 \
-  --hdf5_root /public/share/acd7koea4a/hdf5_cesm_no_mbc \
+  --hdf5_root /root/data/hdf5_cesm_no_mbc \
   --seasons DJF \
-  --ckpt /public/home/acd7koea4a/work/runs/exp01_no_all/checkpoints/best.pt \
-  --out_dir /public/home/acd7koea4a/work/infer_out_cesm_no_mbc \
+  --ckpt /root/work4/runs/exp01_no_all/checkpoints/best.pt \
+  --out_dir /root/data/infer_out_cesm_no_mbc \
+  --no_skip_bad_dates \
   --output_mode per_sample \
   --output_format nc \
   --output_space physical \
@@ -237,7 +215,6 @@ class ModelConfig:
     num_resblocks: int
     use_cbam: bool
     hr_aux_mode: str
-    norm_type: str = "batch"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -318,7 +295,7 @@ def _parse_args() -> argparse.Namespace:
         "--coord_ref_nc",
         default=None,
         type=str,
-        help="optional reference NetCDF file to source lat/lon coordinates (e.g. /public/share/acd7koea4a/example/obs_20000101.nc)",
+        help="optional reference NetCDF file to source lat/lon coordinates (default: paths.EXAMPLE_NC)",
     )
     p.add_argument("--coord_lat_var", default="lat", type=str, help="latitude variable name in --coord_ref_nc (default: lat)")
     p.add_argument("--coord_lon_var", default="lon", type=str, help="longitude variable name in --coord_ref_nc (default: lon)")
@@ -420,25 +397,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no_cbam", dest="use_cbam", action="store_false")
     p.set_defaults(use_cbam=True)
     p.add_argument("--hr_aux_mode", default="all", choices=["all", "stage1", "none"])
-    p.add_argument(
-        "--use_ema",
-        action="store_true",
-        help=(
-            "从 checkpoint 加载 model_ema（训练时 --ema_decay>0 保存的滑动平均权重）而非默认的 "
-            "在线权重 model。EMA 权重通常验证/泛化更稳健，是推荐的部署权重；若 checkpoint 中 "
-            "无 model_ema（训练未启用 EMA）则自动回退到 model 并打印警告。"
-        ),
-    )
-    p.add_argument(
-        "--norm_type",
-        default="batch",
-        choices=["batch", "group"],
-        help=(
-            "ResBlock/InitConv/Head 的归一化层类型，须与训练时 train.py 的 --norm_type 一致，"
-            "否则 state_dict 加载会因层结构不匹配而报错。用 --auto_model_cfg 时无需手动指定，"
-            "会从 checkpoint 的 state_dict 自动判断（GroupNorm 无 running_mean/running_var buffer）。"
-        ),
-    )
 
     return p.parse_args()
 
@@ -807,13 +765,8 @@ def _torch_load_weights(ckpt_path: Path, device: torch.device) -> object:
         return torch.load(ckpt_path, map_location=device)
 
 
-def _load_ckpt_state_dict(ckpt_path: Path, device: torch.device, use_ema: bool = False) -> dict:
+def _load_ckpt_state_dict(ckpt_path: Path, device: torch.device) -> dict:
     ckpt = _torch_load_weights(ckpt_path, device)
-    if use_ema and isinstance(ckpt, dict):
-        if "model_ema" in ckpt:
-            print("[ckpt] 使用 model_ema（训练时 --ema_decay>0 保存的滑动平均权重）进行推理")
-            return ckpt["model_ema"]
-        print("[ckpt] 警告：checkpoint 中无 model_ema（训练时未启用 --ema_decay），回退使用 model")
     if isinstance(ckpt, dict) and "model" in ckpt:
         return ckpt["model"]
     if isinstance(ckpt, dict):
@@ -846,12 +799,6 @@ def _infer_use_cbam(sd: dict) -> bool:
     return any(".cbam." in k for k in sd.keys())
 
 
-def _infer_norm_type(sd: dict) -> str:
-    # BatchNorm2d 有 running_mean/running_var/num_batches_tracked buffer；GroupNorm 没有，
-    # 仅有 weight/bias。用 init_conv.1（InitConv 的归一化层）的 buffer 是否存在来判断。
-    return "batch" if "init_conv.1.running_mean" in sd else "group"
-
-
 def _infer_hr_aux_mode(sd: dict, base_ch: int) -> str:
     # Determine if head concatenates hr_aux by looking at head.0.weight in_channels.
     w_head0 = sd.get("head.0.weight", None)
@@ -876,13 +823,11 @@ def _infer_model_cfg_from_state_dict(sd: dict) -> ModelConfig:
     num_resblocks = _infer_num_resblocks(sd)
     use_cbam = _infer_use_cbam(sd)
     hr_aux_mode = _infer_hr_aux_mode(sd, base_ch)
-    norm_type = _infer_norm_type(sd)
     return ModelConfig(
         base_ch=base_ch,
         num_resblocks=num_resblocks,
         use_cbam=use_cbam,
         hr_aux_mode=hr_aux_mode,
-        norm_type=norm_type,
     )
 
 
@@ -899,8 +844,6 @@ def _build_model(cfg: ModelConfig, device: torch.device) -> torch.nn.Module:
         hr_aux_mode=cfg.hr_aux_mode,
         use_checkpoint=False,          # 推理阶段不需要 gradient checkpointing
         stage4_shuffle_conv_k=1,       # 与训练保持一致，加载权重时形状匹配
-        norm_type=cfg.norm_type,
-        interp_chunk_channels=32,      # 规避 ROCm/HIP 上大 Tensor 插值的 fp32 显存问题，见 model.py
     ).to(device)
     model.eval()
     return model
@@ -1428,7 +1371,7 @@ def main() -> None:
     print(f"Using device: {device}  (amp_bf16={use_amp})")
 
     ckpt_path = Path(args.ckpt)
-    sd = _load_ckpt_state_dict(ckpt_path, device, use_ema=bool(args.use_ema))
+    sd = _load_ckpt_state_dict(ckpt_path, device)
 
     if args.auto_model_cfg:
         cfg = _infer_model_cfg_from_state_dict(sd)
@@ -1439,7 +1382,6 @@ def main() -> None:
             num_resblocks=args.num_resblocks,
             use_cbam=bool(args.use_cbam),
             hr_aux_mode=args.hr_aux_mode,
-            norm_type=args.norm_type,
         )
 
     model = _build_model(cfg, device)
@@ -1800,7 +1742,7 @@ def main() -> None:
             )
             total_excluded += n_excluded
             if n_excluded:
-                print(f"[exclude_dates] skipped {n_excluded} sample(s) in {h5path.name} (known-bad dates)")
+                print(f"[exclude_dates] skipped {n_excluded} sample(s) in {h5path.name}")
             if not keep_i:
                 continue
 

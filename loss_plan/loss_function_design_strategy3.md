@@ -1,3 +1,5 @@
+> **已过期（历史讨论稿）。** 定案与当前代码以 `loss_plan/final_decision.md` 和 `train.py` v2 为准；不要按本文 CLI 训练。
+
 # Loss function design strategy
 _Exported on 2026/9/15 at GMT+8 13:23:43 from Cursor (3.10.20)_
 

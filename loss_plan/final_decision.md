@@ -56,7 +56,7 @@ $$L = \underbrace{L_{\text{tail}}^{\text{area-weighted}}(\gamma=0.5,\ z_{\max}=3
 
 - 在现有 `TailWeightedMAE` 的像素权重 `w = 1 + γ·clamp(|y|, 0, z_max)` 基础上，**再乘以 `cos(latitude)` 归一化面积权重**（`dataset.py` 中已有 `_LAT_HR` 静态纬度数组，可直接生成 `(1801,1)` 的面积权重图并广播，成本极低）。
 - `--var_weights` 默认改为全 1（同 v1），偏置权重仍可显式传参用于对照。
-- 验证指标 `MAE_val/*` 同步改为面积加权版本，与训练目标口径一致（避免"训练面积加权、评估像素等权"的口径不一致）。
+- 训练损失叠加面积加权；**验证/早停的 `Loss/val` 与 `MAE_val/*` 仍保持像素等权纯 MAE**（与历史 run 可比）。面积加权版本单独记为诊断指标 `MAE_val_area_weighted/*`，不参与 `best.pt` 选择。这是相对评审原文「验证也改面积加权」的有意保留，实现以 `train.py` / `DOWNSCALE_README.md` 第 4 节为准。
 
 ### 2.2 `PatchExtremeLoss`（v2：新增 patch-mean 项）
 

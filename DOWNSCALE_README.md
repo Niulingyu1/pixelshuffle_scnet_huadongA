@@ -288,12 +288,13 @@ https://www.scnet.cn/help/docs/mainsite/ai/model-training/rdma/
 **启动方式**：
 
 ```bash
-# 单节点多卡（8 张 DCU/GPU），等价 global batch = batch_size × accum_steps × 8
+# 单节点多卡；正式架构 + v2 损失默认值。完整命令见第 9 节。
 torchrun --nnodes=1 --nproc_per_node=8 train.py \
     --hdf5_root "$(python -c 'from paths import HDF5_ROOT; print(HDF5_ROOT)')" \
-    --epochs 100 --batch_size 1 --accum_steps 4 \
-    --base_ch 128 --no_cbam --hr_aux_mode none \
-    --run_dir runs/exp01_ddp_1node
+    --epochs 100 --batch_size 1 --accum_steps 2 --val_fraction 0.2 --val_interval 2 \
+    --no_cbam --hr_aux_mode stage1 --norm_type group --ema_decay 0.999 \
+    --warmup_ratio 0.03 --early_stop_patience 20 \
+    --run_dir runs/exp_prod_ddp_1node
 
 # Slurm 提交（单节点多卡）：
 sbatch slurm/train_ddp_single_node.slurm
@@ -323,28 +324,30 @@ sbatch slurm/train_ddp_multi_node.slurm
   `torchrun`（写法与官方《模型训练最佳实践》示例一致）：
 
 ```bash
+# 不要手抄旧消融参数。正式配置已封装：
+bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
+```
+
+等价的 `torchrun` 写法（`NPROC_PER_NODE` 必须等于控制台「每实例加速卡数量」）：
+
+```bash
 torchrun \
     --nnodes=$WORLD_SIZE \
-    --nproc_per_node=2 \
+    --nproc_per_node=${NPROC_PER_NODE:-8} \
     --node_rank=$RANK \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
     train.py \
     --hdf5_root "$(python -c 'from paths import HDF5_ROOT; print(HDF5_ROOT)')" \
-    --epochs 100 --batch_size 1 --accum_steps 4 --val_fraction 0.2 \
-    --num_workers 4 --base_ch 128 --no_cbam --hr_aux_mode none \
-    --loss_gamma 0.0 --lambda_freq 0.0 --lambda_grad 0.0 \
-    --early_stop_patience 20 --run_dir runs/exp01_ddp_platform
+    --epochs 100 --batch_size 1 --accum_steps 2 --val_fraction 0.2 --val_interval 2 \
+    --no_cbam --hr_aux_mode stage1 --norm_type group --ema_decay 0.999 \
+    --warmup_ratio 0.03 --early_stop_patience 20 \
+    --run_dir runs/exp_prod_ddp_platform
 ```
 
   其中 `--nproc_per_node` 需与控制台「每实例加速卡数量」一致（如 2 卡实例填 2）。
-
-- 已封装好上述逻辑（含依赖/路径自检）的脚本：`scripts/launch_platform_train.sh`，
-  「启动命令」一栏直接填：
-
-```bash
-bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
-```
+  架构冒烟用 `scripts/launch_platform_smoke_single.sh` / `smoke_ddp.sh`；
+  8 卡短跑用 `scripts/launch_platform_short_8gpu.sh`。
 
 - **提交前请确认**（容器环境与 Slurm 登录节点不同，以下几点最容易踩坑）：
   1. **不要** `source env/activate.sh`——该脚本是为 Slurm 登录节点的 `module` + `conda`
@@ -436,22 +439,9 @@ nohup python train.py \
 | `--no_checkpoint` | 关闭 gradient checkpointing | 显存占用上升，速度加快 |
 | `--manifests <tag...>` | 限定 shard 的 batch_tag 白名单 | 见 `dataset.py` `_build_index`，用于排除坏批次 |
 
-多个开关可以叠加使用（如 `--no_cbam --hr_aux_mode none`）。消融实验一键启动示例：
-
-```bash
-tensorboard --logdir runs/ablation &   # 先开 TensorBoard
-
-# A. 基准（全量，当前默认 base_ch=256）
-python train.py --base_ch 256 --run_dir runs/ablation/A_baseline
-
-# B. 无 CBAM
-python train.py --base_ch 256 --no_cbam --run_dir runs/ablation/B_no_cbam
-
-# C. 无 HR-aux
-python train.py --base_ch 256 --hr_aux_mode none --run_dir runs/ablation/C_no_hr_aux
-```
-
-更多消融组合（含损失函数消融 A-H）见 `train.py` 文件顶部的模块 docstring——**这是当前唯一权威、随代码同步更新的消融命令来源**，本文档不再重复维护完整命令列表以避免再次与代码脱节。
+多个开关可以叠加使用（如 `--no_cbam --hr_aux_mode none`）。架构消融示例见
+`train.py` 顶部 A–D；损失函数消融（含纯 MAE 必须关掉的全部 λ）见顶部 E–H。
+**不要只传 `--loss_gamma 0` 就当成纯 MAE。** 本文档不再重复维护完整命令列表。
 
 ---
 
@@ -464,6 +454,7 @@ python train.py --base_ch 256 --hr_aux_mode none --run_dir runs/ablation/C_no_hr
 ## 8. CESM 推理推荐流程（稳定版）
 
 为避免 CESM 直接推理时可能出现的局部空间错配，推荐将 CESM 原始数据先离线转换为与测试集一致语义的 HDF5，再用 `infer.py` 的 HDF5 分支推理。
+正式权重请加 `--auto_model_cfg --use_ema`（GroupNorm + EMA）。
 
 推荐流程：
 
@@ -486,6 +477,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n pytorch_downscale python /public/home/acd7ko
   --hdf5_root /public/share/acd7koea4a/hdf5_cesm \
   --seasons DJF \
   --ckpt /public/home/acd7koea4a/work/runs/exp01_no_all/checkpoints/best.pt \
+  --auto_model_cfg --use_ema \
   --out_dir /public/home/acd7koea4a/work/infer_out_cesm_stable \
   --output_mode per_sample \
   --output_format nc \

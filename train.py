@@ -76,11 +76,12 @@ PixelShuffleDownscaleNet 模型训练脚本。
         --run_dir runs/debug
 
 ─────────────────────────────────────────────────────────────
-消融实验对照组（每组独立 run_dir，TensorBoard 中对比）：
+消融实验对照组（每组独立 run_dir，TensorBoard 中对比）。
+A–D 只改架构，损失仍走 v2 默认；E–G 在正式架构上拆损失。不传损失参数 ≠ 纯 MAE。
 
-  # A. 基准（全量：1×1 init + base_ch=256 + CBAM-M1 + HR-aux 全量注入 + 组合损失默认值）
+  # A. 代码默认架构（CBAM 开 + HR-aux 全注入 + BatchNorm；非正式训练）
   python train.py --base_ch 256 \\
-      --run_dir runs/ablation/A_baseline
+      --run_dir runs/ablation/A_code_defaults
 
   # B. 无 CBAM
   python train.py --base_ch 256 --no_cbam \\
@@ -90,34 +91,33 @@ PixelShuffleDownscaleNet 模型训练脚本。
   python train.py --base_ch 256 --hr_aux_mode none \\
       --run_dir runs/ablation/C_no_hr_aux
 
-  # D. 仅 Stage1 注入 HR-aux（360×720 分辨率获得地形/位置引导，高分辨率阶段不注入）
+  # D. 仅 Stage1 注入 HR-aux
   python train.py --base_ch 256 --hr_aux_mode stage1 \\
       --run_dir runs/ablation/D_hr_aux_stage1_only
 
-  # E. 纯 MAE（γ=0，关闭 FFT/Grad，等价于旧版训练，用作损失函数消融基准）
-  python train.py --base_ch 256 \\
-      --loss_gamma 0.0 --lambda_freq 0.0 --lambda_grad 0.0 \\
+  # E. 纯 MAE（须显式关掉面积加权与全部增量项，才与 nn.L1Loss 数值等价）
+  python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \\
+      --loss_gamma 0.0 --var_weights "" --no_area_weight \\
+      --lambda_extreme 0.0 --lambda_patch_extreme 0.0 --lambda_wps 0.0 --lambda_phys 0.0 \\
+      --lambda_freq 0.0 --lambda_grad 0.0 \\
       --run_dir runs/ablation/E_pure_mae
 
-  # F. 仅尾部加权（验证极值权重单独效果）
-  python train.py --base_ch 256 \\
-      --loss_gamma 0.5 --lambda_freq 0.0 --lambda_grad 0.0 \\
-      --run_dir runs/ablation/F_tail_only
+  # F. 仅面积加权尾部 MAE（关 v2 增量项与旧版 FFT/Grad/SpatialExtreme）
+  python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \\
+      --loss_gamma 0.5 --lambda_patch_extreme 0.0 --lambda_wps 0.0 --lambda_phys 0.0 \\
+      --lambda_extreme 0.0 --lambda_freq 0.0 --lambda_grad 0.0 \\
+      --run_dir runs/ablation/F_tail_area_only
 
-  # G. 完整组合损失（旧默认，含 FFT/Grad，用于消融对比新默认是否更优）
-  python train.py --base_ch 256 \\
+  # G. 旧版 FFT/Grad 组合（仅对照；须关掉 v2 增量项，再显式打开旧项）
+  python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \\
+      --lambda_patch_extreme 0.0 --lambda_wps 0.0 --lambda_phys 0.0 \\
       --loss_gamma 0.5 --lambda_freq 0.1 --lambda_grad 0.05 \\
-      --run_dir runs/ablation/G_combined_loss
+      --run_dir runs/ablation/G_legacy_fft_grad
 
-  # H. 风光资源导向损失（新默认：TailMAE×逐变量通道权重 + SpatialExtreme(wind10,FSDS)×0.1，
-  #    关闭 FFT/Grad；架构与 no_all 一致，用于验证新损失机制本身的效果）
-  python train.py --base_ch 256 --no_cbam --hr_aux_mode none \\
-      --loss_gamma 1.5 --loss_z_max 1.5 \\
-      --lambda_freq 0 --lambda_grad 0 \\
-      --var_weights "TAS=1.2,PRE=1.0,wind10=1.5,Q=1.0,2M_RH=1.2,2M_TMAX=1.0,2M_TMIN=1.0,FSDS=1.5" \\
-      --extreme_vars wind10,FSDS --lambda_extreme 0.1 \\
-      --val_extreme_z_thresh 1.5 \\
-      --run_dir runs/ablation/H_wind_solar_focus
+  # H. v2 正式训练（推荐：架构锁定 + 损失默认值，与 launch_platform_train.sh 一致）
+  python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \\
+      --ema_decay 0.999 --warmup_ratio 0.03 \\
+      --run_dir runs/ablation/H_loss_v2_official
 
   # 同时打开所有 runs 的 TensorBoard：
   tensorboard --logdir runs/ablation
@@ -125,7 +125,7 @@ PixelShuffleDownscaleNet 模型训练脚本。
 ─────────────────────────────────────────────────────────────
 """
 
-# 训练要点：组合损失（TailWeightedMAE + FFT + Gradient）、AdamW、线性 warmup + 余弦退火、梯度累积（默认 accum=2）、bf16 autocast、gradient checkpoint、TensorBoard 与 top-k 存盘。
+# 训练要点：v2 组合损失（面积加权 TailWeightedMAE + PatchExtreme + WPS + Phys；旧版 FFT/Grad/SpatialExtreme 默认关）、AdamW、线性 warmup + 余弦退火、梯度累积（默认 accum=2）、bf16 autocast、gradient checkpoint、TensorBoard 与 top-k 存盘。
 
 from __future__ import annotations
 

@@ -1,12 +1,14 @@
 #!/bin/bash
-# SCNet「模型训练」BW 单卡测速 — 与 A800 exp01_no_all_100 完全对齐。
+# SCNet「模型训练」单卡测速 — 对齐历史 A800 exp01_no_all_100（不是当前正式训练）。
 #
 # 对齐基准：train_exp01_no_all_100.log（A800，改分布式代码之前）
 #   - 全量 hdf5（14685 样本，val_fraction=0.2）
 #   - base_ch=256，no_cbam，hr_aux_mode=none（17.38M 参数）
-#   - 纯 MAE：loss_gamma=0，关闭 FFT/Grad/SpatialExtreme/通道权重
+#   - 纯 MAE：关尾部加权、面积加权、v2 增量项、旧版 SpatialExtreme/FFT/Grad
 #   - batch_size=1，accum_steps=4，num_workers=4，log_interval=50
 #   - 单卡非分布式（distributed=False，无 DDP/NCCL/SyncBN 开销）
+#
+# 当前正式训练请用 scripts/launch_platform_train.sh（stage1 + group + ema + v2 损失）。
 #
 # 控制台配置：
 #   - 每实例加速卡数量 = 1
@@ -48,9 +50,9 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="runs/benchmark_bw_a800_aligned_${RUN_TAG}"
 LOG_FILE="logs/benchmark_bw_a800_aligned_${RUN_TAG}.log"
 
-echo "=== A800 对齐配置（exp01_no_all_100）==="
+echo "=== 历史 A800 对齐配置（exp01_no_all_100，非正式训练）==="
 echo "HDF5_ROOT=${HDF5_ROOT}"
-echo "base_ch=256 | pure MAE | batch=1 accum=4 | distributed=False"
+echo "base_ch=256 | hr_aux=none | pure MAE (v2 extras off) | batch=1 accum=4 | distributed=False"
 echo "对比 A800 基线: Epoch 001 done in 17997.0s (~5.00h)"
 echo "日志: ${LOG_FILE}"
 
@@ -72,11 +74,15 @@ python -u train.py \
     --no_cbam \
     --hr_aux_mode none \
     --loss_gamma 0.0 \
+    --var_weights "" \
+    --no_area_weight \
+    --lambda_extreme 0.0 \
+    --lambda_patch_extreme 0.0 \
+    --lambda_wps 0.0 \
+    --lambda_phys 0.0 \
     --lambda_freq 0.0 \
     --lambda_grad 0.0 \
-    --lambda_extreme 0.0 \
     --extreme_vars "" \
-    --var_weights "" \
     --log_interval 50 \
     --early_stop_patience 0 \
     --run_dir "${RUN_DIR}" \

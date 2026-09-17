@@ -1,4 +1,7 @@
 r"""
+过期副本，不要用。当前推理入口是同目录的 infer.py（含 --use_ema、--norm_type、
+--auto_model_cfg 推断 GroupNorm）。本文件保留仅供对照旧行为，示例路径来自其它工作区。
+
 PixelShuffleDownscaleNet 推理脚本。
 
 主要目标：

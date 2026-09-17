@@ -29,8 +29,8 @@ Epoch 001~080 done in ~17960~17997s（约 5.0 小时/epoch），全程无 OOM、
 **这份日志证明的事实**：`base_ch=256 + checkpoint=True`（跟本次准备正式训练的规模一致）
 在单张 A800（80GB）上**跑 `batch_size=1` 完全没有显存问题**，与 DCU（64GB）上"batch_size=1
 都只剩 1.2GB 余量"的紧张状况明显不同——这符合"80GB 比 64GB 多 25%"的预期，而且这次跑的配置
-（`hr_aux_mode=none`，无 CBAM，无 SpatialExtreme/FFT/Grad 额外损失）比本次准备用的
-`hr_aux_mode=stage1` + 完整 CombinedLoss（含 SpatialExtreme×0.1）更省显存，所以**不能直接
+（`hr_aux_mode=none`，无 CBAM，纯 MAE）比本次准备用的
+`hr_aux_mode=stage1` + v2 CombinedLoss（面积加权 TailMAE + PatchExtreme + WPS + Phys）更省显存，所以**不能直接
 当作"新配置在 A800 上也稳"的证明，但可以当作"这个数量级的显存需求在 A800 上有很大安全边际"
 的强有力参考**。
 
@@ -59,7 +59,9 @@ A800 环境也是单卡或少卡，100 epoch 会是几百小时的量级（单�
 
 **正式训练的架构/训练策略决策**（与硬件无关，继续沿用，不需要重新讨论）：
 `--no_cbam`、`--hr_aux_mode stage1`、`--norm_type group`、`--ema_decay 0.999`、
-`--warmup_ratio 0.03`、DDP 分布式、默认 CombinedLoss 权重配置。
+`--warmup_ratio 0.03`、DDP 分布式、v2 CombinedLoss 默认权重
+（面积加权 TailMAE + `--lambda_patch_extreme 0.1` + `--lambda_wps 0.05` + `--lambda_phys 0.02`；
+旧版 SpatialExtreme/FFT/Grad 默认关闭）。
 
 ---
 
@@ -77,7 +79,8 @@ A800 环境也是单卡或少卡，100 epoch 会是几百小时的量级（单�
 支持更成熟，此问题在 A800 上**很可能不存在**。
 
 **已实现的修复**（`model.py` 的 `_interp_chunked` / `_interp_grid_sample_chunked`，
-`train.py`/`infer.py` 的 `--interp_chunk_channels`、`--interp_backend`）：按通道分块插值，
+`train.py` 的 `--interp_chunk_channels`、`--interp_backend`；`infer.py` 把
+`interp_chunk_channels` 写死为 32，无对应 CLI）：按通道分块插值，
 每块算完立刻转回原 dtype 再拼接，数学上与不分块结果**逐元素完全相同**（已在 CPU 上验证
 `max_abs_diff=0.0`），纯粹是显存分配策略，不影响模型精度。
 

@@ -1,3 +1,5 @@
+> **已过期（历史讨论稿）。** 定案与当前代码以 `loss_plan/final_decision.md` 和 `train.py` v2 为准；不要按本文 CLI 训练。
+
 Now let's update the argparse block to add the new flags:Now let's update the instantiation block:Now let's add the recommended one-shot config to the top docstring:Now let's finalize the file and present it to the user.我已经通读了四个文件，并直接在 `train.py` 里落地了新的损失函数设计（已生成可下载版本）。下面按"现状诊断 → 文献依据 → 最终方案 → 为什么能一次成型"说明。
 
 ## 1. 现状诊断：当前损失设计的两个结构性痛点

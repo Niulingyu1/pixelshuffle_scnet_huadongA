@@ -1,7 +1,7 @@
 # 全量训练指导（基于 2026-09-12 冒烟测试）
 
-日期：2026-09-12  
-范围：SCNet「模型训练」控制台 + BW1000（海光 DCU / DTK）  
+日期：2026-09-12（损失方案于 2026-09-17 更新为 v2，见第 4 节）  
+范围：SCNet「模型训练」控制台 + BW1000（海光 DCU / DTK）；A800 入口见 `scripts/launch_platform_*.sh`  
 依据：单卡冒烟 `runs/smoke_cra1p5_full_0038`、2 卡 DDP 冒烟 `runs/smoke_ddp_cra1p5_full_0038`
 
 冒烟只验证管线（前向 / 反向 / 存盘 / DDP 聚合），**16 个样本上的 MAE 没有业务意义**。
@@ -125,9 +125,18 @@ torch.OutOfMemoryError: HIP out of memory. Tried to allocate 15.82 GiB
 --epochs 100 --early_stop_patience 20 --manifests cra1p5_full
 ```
 
-损失保持默认：TailWeightedMAE + 通道权重 + SpatialExtreme×0.1，**FFT / Grad 关**。
+损失走 `train.py` **v2 默认**（与 `DOWNSCALE_README.md` 第 4 节一致），不要再手写 v1 的通道偏置 / `--lambda_extreme`：
 
-风光加强（把 wind10 / FSDS 权重拉到 2.0、`--lambda_extreme 0.2`）等第一版跑稳再单独开对照，不要和第一版绑在同一 run。
+```text
+面积加权 TailWeightedMAE(γ=0.5, 通道权重全 1)
++ PatchExtreme(wind10,FSDS)×0.1
++ WindPowerSensitivityProxy×0.05
++ PhysicalConsistency×0.02
+FFT / Grad / 旧版 SpatialExtreme 默认关
+```
+
+纯 MAE 对照必须显式关掉全部增量项和面积加权，见 README 第 4.4 节，不要只传 `--loss_gamma 0`。
+风光加强优先调 `--lambda_patch_extreme` / `--lambda_wps`，不要和第一版绑在同一 run。
 
 | 资源 | batch / accum | 启动 |
 | --- | --- | --- |
@@ -153,7 +162,7 @@ torch.OutOfMemoryError: HIP out of memory. Tried to allocate 15.82 GiB
 | 每实例卡数 | 4（稳了再试 8） |
 | 实例数 | 1 |
 | 镜像 | 与冒烟成功相同的 DTK 镜像 |
-| 启动命令 | 下面整段 |
+| 启动命令 | `bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh`（2 卡时先 `export NPROC_PER_NODE=2`） |
 
 ### 5.1 推荐：1 实例 × 4 卡
 
@@ -277,7 +286,7 @@ tail -f /public/home/acd7koea4a/work/logs/full_ddp_*.log
 | 看什么 | 看哪个 |
 | --- | --- |
 | 选模型、早停、论文主表 | `Loss/val` → `best.pt` |
-| 风光资源 | `MAE_val_resource/mean`、`MAE_val_extreme/wind10`、`MAE_val_extreme/FSDS` → `best_resource.pt` |
+| 风光资源 | `Skill_val/wind10`、`Skill_val/FSDS`、`MAE_val_extreme/wind10`、`MAE_val_extreme/FSDS` → `best_resource.pt` |
 | 降水真实误差 | `MAE_val_physical/PRE`（mm/day），不要只看 `MAE_val/PRE`（那是 log1p） |
 | 训练诊断 | `Loss/val_combined` 及各子项（不可跨 run 比大小） |
 
@@ -298,7 +307,7 @@ python infer.py --ckpt runs/exp_prod_ddp_4gpu/checkpoints/best.pt \
 ## 7. 第一版不要一起改的东西
 
 - 不要开 `--compile`（未在 BW1000 + DDP 上验证）
-- 不要叠 FFT / Grad，不要同时改 `var_weights`
+- 不要叠 FFT / Grad，不要改回 v1 的 `--lambda_extreme` 或通道偏置 `var_weights`
 - 不要一上来就把 `batch_size` 提到 2（4 卡短跑显存够再提）
 - 不要跨节点、多实例，除非单节点 8 卡已经稳定
 - 数据没齐不要指向正在上传的整个 `hdf5/`
@@ -311,8 +320,8 @@ python infer.py --ckpt runs/exp_prod_ddp_4gpu/checkpoints/best.pt \
 
 1. 等四季 HDF5 传完，确认无 `*.raysync.uploading`
 2. 全量路径、2～4 卡、1～2 epoch 短跑（只验证读盘 / 显存 / 落盘）
-3. 同一套命令拉到 100 epoch（第一版，默认损失）
-4. 第一版有数后，单独开风光加强对照
+3. 同一套命令拉到 100 epoch（第一版，v2 默认损失）
+4. 第一版有数后，单独开 `--lambda_patch_extreme` / `--lambda_wps` 对照
 5. 再考虑：8 卡、`batch_size=2`、`--compile`、按年切验证集
 
 ---
@@ -322,8 +331,13 @@ python infer.py --ckpt runs/exp_prod_ddp_4gpu/checkpoints/best.pt \
 | 用途 | 路径 |
 | --- | --- |
 | 训练入口 | `/public/home/acd7koea4a/work/train.py` |
+| 平台正式启动 | `scripts/launch_platform_train.sh` |
+| 平台冒烟 | `scripts/launch_platform_smoke_single.sh`、`launch_platform_smoke_ddp.sh` |
+| 平台 8 卡短跑 | `scripts/launch_platform_short_8gpu.sh` |
+| 历史纯 MAE 对齐 | `scripts/launch_platform_train_bw_a800_aligned_benchmark.sh` |
 | 本指南 | `/public/home/acd7koea4a/work/FULL_RUN_GUIDE.md` |
 | 更完整的分析与消融 | `/public/home/acd7koea4a/work/TRAINING_ANALYSIS.md` |
+| 损失定案 | `/public/home/acd7koea4a/work/loss_plan/final_decision.md` |
 | 冒烟数据 | `/public/home/acd7koea4a/work/smoke_test_data` |
 | 正式 HDF5 | `/public/share/acd7koea4a/hdf5` |
 | 单卡冒烟日志 | `logs/smoke_cra1p5_full_0038_20260912_193344.log` |

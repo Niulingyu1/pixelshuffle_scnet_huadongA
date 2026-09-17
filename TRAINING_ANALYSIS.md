@@ -109,9 +109,9 @@ HDF5 shard_*.h5
 
 | 问题 | 现状 |
 | --- | --- |
-| README 第 4 节仍写 `lambda_freq=0.1`、`lambda_grad=0.05`，且未写 `var_weights` / `SpatialExtremeLoss` | 已按当前 `train.py` 重写第 4 节 |
+| README 第 4 节仍写 `lambda_freq=0.1`、`lambda_grad=0.05`，且未写 `var_weights` / `SpatialExtremeLoss` | 已按 `train.py` **v2** 重写第 4 节 |
 | README 仍出现 `--no_hr_aux`、`--init_type`、`in_ch=15`、`base_ch=128` 等旧参数 | 已校正第 3 节通道数；新增第 6 节速查，旧命令不再作为可执行示例 |
-| `slurm/train_gpu.slurm` 锁死旧消融基线（`base_ch=128 --no_cbam --hr_aux_mode none` + 纯 MAE） | 已改为当前默认全量配置，输出目录 `runs/exp_full_default` |
+| `slurm/train_gpu.slurm` 与平台 `launch_platform_train.sh` 锁死旧消融基线 | 已改为正式架构 + v2 损失；单卡输出 `runs/exp_prod_single_gpu` |
 
 权威消融命令以 `train.py` 文件顶部 docstring 为准。
 
@@ -120,32 +120,35 @@ HDF5 shard_*.h5
 在不改变标准模型选择规则的前提下，新增：
 
 - `--resource_vars`（默认 `wind10,FSDS`）
-- TensorBoard：`MAE_val_resource/mean`
+- TensorBoard：`Skill_val/<var>`、`Skill_val_resource/mean`
 - 并行 checkpoint：`best_resource.pt`
 
-`best.pt` / 早停 / top-K **仍然只看全部 8 变量的纯 MAE**。`best_resource.pt` 只给风光资源侧多一个可选起点，二者互不覆盖。
+`best.pt` / 早停 / top-K **仍然只看全部 8 变量的像素等权纯 MAE**。`best_resource.pt` 按 wind10/FSDS 相对 LR 双线性插值 naive baseline 的 skill score 均值选取，二者互不覆盖。
 
 ---
 
 ## 3. 损失函数：当前设计与如何加强风、光
 
-### 3.1 当前默认（推荐作为第一版正式训练）
+### 3.1 当前默认（v2，推荐作为第一版正式训练）
 
 ```
-L_train = L_tail(γ=0.5, z_max=3.0, c)
-        + λe · L_extreme(wind10, FSDS)     # 默认 0.1
-        + λf · L_FFT                       # 默认 0，关闭
-        + λg · L_grad                      # 默认 0，关闭
+L_train = L_tail_area(γ=0.5, z_max=3.0, c≡1)
+        + λ_pe · L_patch_extreme(wind10, FSDS)   # 默认 0.1
+        + λ_wps · L_wps(wind10)                  # 默认 0.05
+        + λ_phys · L_phys                        # 默认 0.02
+        + [旧版默认关] λe · L_extreme  +  λf · L_FFT  +  λg · L_grad
 ```
 
 | 子项 | 默认 | 作用范围 | 对 wind10 / FSDS 的针对性 |
 | --- | --- | --- | --- |
-| 尾部权重 `γ·clamp(\|y\|,0,3)` | 开，γ=0.5 | 全部 8 通道、逐像素 | 无针对性；\|z\|=3 时权重最高约 2.5× |
-| 逐变量权重 `--var_weights` | 开 | 指定通道、全部像素 | 已倾斜：wind10=1.5，FSDS=1.5，TAS/2M_RH=1.2，其余=1.0 |
-| `SpatialExtremeLoss` | 开，λ=0.1 | 仅 `--extreme_vars` | 专门约束区域 max/min，保护风速峰值、辐照度晴空/云遮极值 |
-| FFT / Grad | 关 | 全部通道 | 历史消融显示会拖累 TAS / TMAX / TMIN，默认不要开 |
+| 面积加权 TailWeightedMAE | 开，γ=0.5 | 全部 8 通道；通道权重默认全 1 | 无通道偏置；高纬度面积高估由 cos(lat) 修正 |
+| `PatchExtremeLoss` | 开，λ=0.1 | 仅 `--patch_extreme_vars`（默认 wind10,FSDS） | 局部网格 max/min/mean，替代旧版全球 SpatialExtreme |
+| `WindPowerSensitivityProxy` | 开，λ=0.05 | 仅 wind10，真值 3–12 m/s | 功率敏感区代理，不是发电量对齐 |
+| `PhysicalConsistencyLoss` | 开，λ=0.02 | 先反标准化再 hinge | 安全网；禁止在 z 空间直接比较 |
+| 旧版 SpatialExtreme / FFT / Grad | 关 | — | 仅供对照，不要当正式默认 |
 
-结论：**当前默认已经是风光资源优先设计**。第一版正式训练不要再叠 FFT/Grad，也不要一上来就把权重拉到极端。
+结论：**v2 用独立增量项做风光增强，不再靠通道偏置抢温度/降水的梯度。** 第一版正式训练不要再叠 FFT/Grad，也不要改回 `--lambda_extreme`。
+只传 `--loss_gamma 0` **不是**纯 MAE：还必须 `--no_area_weight` 并关掉 patch/wps/phys。
 
 ### 3.2 想让辐射和风学得更好：三个杠杆，从精准到粗放
 
@@ -153,24 +156,24 @@ L_train = L_tail(γ=0.5, z_max=3.0, c)
 
 | 优先级 | 参数 | 建议 | 为什么先调它 |
 | --- | --- | --- | --- |
-| 1 | `--lambda_extreme` | 0.1 → 0.2（最多试到 0.3） | 只影响 wind10/FSDS，直接保护区域极值，最不影响其它变量 |
-| 2 | `--var_weights` 中 wind10/FSDS | 1.5 → 2.0 | 只抬这两个通道的全场梯度预算；同时把 TAS/2M_RH 从 1.2 降回 1.0，避免它们继续抢梯度 |
+| 1 | `--lambda_patch_extreme` | 0.1 → 0.05 或 0.15 | 只影响 wind10/FSDS 局部极值；冒烟若见系统性正偏差优先下调 |
+| 2 | `--lambda_wps` | 0.05 → 0.02 或 0.08 | 只影响 wind10 爬坡段；先看 `Loss/wps_mask_ratio` 是否过密 |
 | 3 | `--loss_gamma` | 先不动 | 作用在全部 8 通道，对风/光没有针对性 |
 
 推荐加强配置（待默认全量跑通后再做对照，不要和第一版绑在一起）：
 
 ```bash
-python train.py --base_ch 256 \
-  --var_weights "TAS=1.0,PRE=1.0,wind10=2.0,Q=1.0,2M_RH=1.0,2M_TMAX=1.0,2M_TMIN=1.0,FSDS=2.0" \
-  --extreme_vars wind10,FSDS --lambda_extreme 0.2 \
+python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \
+  --ema_decay 0.999 --warmup_ratio 0.03 \
+  --lambda_patch_extreme 0.15 --lambda_wps 0.08 \
   --run_dir runs/exp_loss_wind_solar_boost
 ```
 
 观察：
 
-- 应下降：`MAE_val/wind10`、`MAE_val/FSDS`、`MAE_val_extreme/wind10`、`MAE_val_extreme/FSDS`、`MAE_val_resource/mean`
-- 不应明显变差：`MAE_val/TAS`、`MAE_val/2M_RH`、`MAE_val_physical/PRE`
-- 这是多目标权衡，建议 2～3 组小规模消融后再定案
+- 应改善：`MAE_val_extreme/wind10`、`MAE_val_extreme/FSDS`、`Skill_val/wind10`、`Skill_val/FSDS`
+- 不应明显变差：`MAE_val/TAS`、`MAE_val/2M_RH`、`MAE_val_physical/PRE`、`Loss/val`
+- 这是多目标权衡，建议小规模消融后再定案
 
 数据预处理层面（收益可能更大，但不要现在做）：wind10 近似 Weibull、右偏，FSDS 有昼夜/云遮跳变。二者目前只用与温度相同的线性 z-score。若下一版重做 HDF5，可考虑给 wind10 做 `sqrt` 或 `log1p`，让回归目标更接近正态。这需要重生成数据，不适合冒烟阶段改。
 
@@ -188,21 +191,23 @@ python train.py --base_ch 256 \
 | `Loss/val_combined` 及各子项 | 与训练相同的 `CombinedLoss` | 诊断：该 run 自己的优化目标在验证集上是否达成 |
 | `MAE_val/<变量>` | 反 z-score 后的物理量纲 MAE | 解读各变量精度；注意 PRE 仍是 log1p 空间 |
 | `MAE_val_physical/PRE` | `expm1` 后的 mm/day | PRE 唯一真实物理量纲误差 |
+| `MAE_val_area_weighted/*` | 与训练一致的 cos(lat) 面积加权 MAE | 诊断/论文报告，不参与 `best.pt` |
 | `MAE_val_extreme/*` | 仅 \|z\| > 阈值的像素 | 看极值是否真的比纯 MAE 训练更好 |
-| `MAE_val_resource/mean` | 默认 wind10+FSDS 物理 MAE 平均 | 业务并行指标 |
+| `Skill_val/<变量>` | 相对 LR 双线性插值 naive baseline 的 skill | 无量纲；>0 优于该 baseline |
+| `Skill_val_resource/mean` | wind10/FSDS skill 等权平均 | `best_resource.pt` 判据 |
 | `best.pt` | `Loss/val` 最优 | 标准交付起点 |
-| `best_resource.pt` | `MAE_val_resource/mean` 最优 | 风光资源侧可选起点 |
+| `best_resource.pt` | skill 均值最大 | 风光资源侧可选起点 |
 
 ### 4.2 为什么不能用组合损失挑 checkpoint
 
-1. **跨 run 不可比**：`λ_extreme=0.1` 和 `0.3` 的组合损失值不是同一个函数，数字不能直接比大小。
+1. **跨 run 不可比**：`λ_patch_extreme=0.1` 和 `0.15` 的组合损失值不是同一个函数，数字不能直接比大小。
 2. **自我评分**：用训练目标挑模型，容易选出对该损失项过拟合、整体点误差反而更差的权重。
 3. **历史可比**：所有旧 run 都用纯 MAE 这把尺子；改掉就无法和历史实验对齐。
 
 正确用法：
 
 - 选模型、早停、写论文主表：看 `Loss/val` 和 `best.pt`
-- 判断“风光加强是否生效”：看 `MAE_val_extreme/wind10`、`MAE_val_extreme/FSDS`、`Loss/val_spatial_extreme`、`best_resource.pt`
+- 判断“风光加强是否生效”：看 `MAE_val_extreme/wind10`、`MAE_val_extreme/FSDS`、`Skill_val/*`、`best_resource.pt`
 - 最终交付：两个 checkpoint 都做一次推理对比，再决定用哪一个
 
 ---
@@ -220,11 +225,11 @@ python train.py --base_ch 256 \
 3. **全量数据后放宽 `--val_interval`**  
    每个验证样本都是 1801×3600 全图前向，很贵。数据上来后可用 `--val_interval 2~5`。早停按“验证次数”计，不会因此失效。
 
-### B. 小改代码，基线跑通后再做
+### B. 已落地为开关（正式训练已启用 group / EMA / warmup_ratio）
 
-4. **BatchNorm → GroupNorm**：彻底摆脱小 batch BN 噪声，但与旧 checkpoint 不兼容，应做成开关消融，不要直接改默认。
-5. **`torch.compile()`**：当前环境是 PyTorch 2.5.1，可能有 10%～30% 加速；先在冒烟规模验证与 checkpoint / DDP 的兼容性。
-6. **EMA 权重**：对小 batch 很有效，实现成本低，适合作为交付权重。
+4. **BatchNorm → GroupNorm**：正式训练用 `--norm_type group`。
+5. **`torch.compile()`**：仍默认关闭，先在冒烟上验证。
+6. **EMA 权重**：正式训练用 `--ema_decay 0.999`；推理加 `infer.py --use_ema`。
 
 ### C. 数据协议，收益可能最大，但不要和第一版训练绑死
 
@@ -232,7 +237,7 @@ python train.py --base_ch 256 \
 8. **验证集按年份切，而不是随机打乱样本**：当前 `random.shuffle(indices)` 会让相邻日期同时出现在 train/val，验证可能偏乐观。若最终要推未见年份或 CESM，应改成按年分组。
 9. **分季节归一化**：四季合并的 `var_all` 会拉大温度/辐射的 z-score 尺度。可作为后续实验，不是本次必须项。
 
-原则：**第一版只做 A 类核对 + 当前默认损失/架构；B、C 一次只改一类，否则无法定位是数据、损失还是结构的问题。**
+原则：**第一版只做 A 类核对 + 当前正式架构/v2 损失；不要把 `--compile`、按年切验证集和损失改权绑在同一 run。**
 
 ---
 
@@ -314,15 +319,15 @@ cd /public/home/acd7koea4a/work
 sbatch slurm/train_gpu.slurm
 ```
 
-这版使用当前代码默认：
+这版使用当前正式配置（脚本已写死，不要改回代码 CLI 默认架构）：
 
-- `base_ch=256`，CBAM 开，`hr_aux_mode=all`
-- 组合损失默认值（Tail + 通道权重 + SpatialExtreme×0.1，FFT/Grad 关）
-- `epochs=100`，`batch_size=1`，`accum_steps=4`，`val_fraction=0.2`
+- `base_ch=256`，`--no_cbam`，`--hr_aux_mode stage1`，`--norm_type group`，`--ema_decay 0.999`
+- v2 损失默认值（面积加权 TailMAE + PatchExtreme 0.1 + WPS 0.05 + Phys 0.02）
+- `epochs=100`，`batch_size=1`，`accum_steps=4`（单卡），`val_fraction=0.2`
 - 早停 patience=20
-- 输出：`runs/exp_full_default`
+- 输出：`runs/exp_prod_single_gpu`
 
-有多卡时，优先改用 `slurm/train_ddp_single_node.slurm`，并把 `batch_size` 提到 2～4，而不是只加 `accum_steps`。
+有多卡时，优先改用 `slurm/train_ddp_single_node.slurm` 或平台脚本 `scripts/launch_platform_train.sh`。
 
 开跑后立刻根据日志重算 warmup：
 
@@ -342,25 +347,26 @@ python -u train.py \
     --manifests cra1p5_full \
     --epochs 100 --batch_size 1 --accum_steps 4 --val_fraction 0.2 \
     --num_workers 4 --early_stop_patience 20 \
-    --var_weights "TAS=1.0,PRE=1.0,wind10=2.0,Q=1.0,2M_RH=1.0,2M_TMAX=1.0,2M_TMIN=1.0,FSDS=2.0" \
-    --extreme_vars wind10,FSDS --lambda_extreme 0.2 \
+    --no_cbam --hr_aux_mode stage1 --norm_type group \
+    --ema_decay 0.999 --warmup_ratio 0.03 \
+    --lambda_patch_extreme 0.15 --lambda_wps 0.08 \
     --run_dir runs/exp_loss_wind_solar_boost
 ```
 
 对比口径：
 
 - 公平比整体点误差：两边的 `Loss/val`
-- 比风光是否真的更好：`MAE_val_extreme/wind10`、`MAE_val_extreme/FSDS`、`MAE_val_resource/mean`
+- 比风光是否真的更好：`MAE_val_extreme/wind10`、`MAE_val_extreme/FSDS`、`Skill_val/*`
 - 交付候选：`best.pt` 与 `best_resource.pt` 都推理一次
 
 ### 第 5 步：基线有数之后再排优化队列
 
 顺序建议：
 
-1. 多卡 + 提高真实 `batch_size`（解决 BN）
+1. 多卡 DDP（平台 `launch_platform_train.sh` 或 `slurm/train_ddp_single_node.slurm`）
 2. 按年份划分验证集（若目标是外推到未见年 / CESM）
-3. EMA
-4. GroupNorm 开关消融
+3. 再单独调 `--lambda_patch_extreme` / `--lambda_wps`
+4. `--compile`（先冒烟验证）
 5. wind10 预处理变换（需重做数据）
 
 ---
@@ -371,7 +377,7 @@ python -u train.py \
 - [ ] 不在登录节点跑 `train.py`
 - [ ] 冒烟使用 `smoke_test_data` + `--manifests cra1p5_full`，不要指向正在上传的整个 `hdf5/MAM`
 - [ ] 正式训练前确认没有 `.raysync.uploading` 半成品被 glob 进来
-- [ ] 第一版正式训练使用默认损失，不叠加 FFT/Grad，不和新的 `var_weights` 绑在同一 run
+- [ ] 第一版正式训练使用 v2 默认损失，不叠加 FFT/Grad，不改回 `--lambda_extreme` / 通道偏置
 - [ ] 选模型看 `best.pt` / `Loss/val`；看风光看 `best_resource.pt` / `MAE_val_extreme/*`
 - [ ] 看降水精度时看 `MAE_val_physical/PRE`，不要只看 `MAE_val/PRE`
 

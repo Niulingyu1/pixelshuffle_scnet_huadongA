@@ -28,6 +28,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from dataset import stats_content_sha256
 from paths import HDF5_ROOT_RAW, HDF5_ROOT_NORM, STATS_FILE
 
 VARIABLES = ["TAS", "PRE", "wind10", "Q", "2M_RH", "2M_TMAX", "2M_TMIN", "FSDS"]
@@ -154,6 +155,7 @@ def _convert_one_shard(
             g_meta.attrs["preprocessing"] = PREPROCESSING_TAG
             g_meta.attrs["stats_file"] = str(stats_file)
             g_meta.attrs["stats_mtime"] = stats_mtime
+            g_meta.attrs["stats_sha256"] = stats_content_sha256(mean, std)
             g_meta.attrs["source_shard"] = src.name
             g_meta.attrs["storage_dtype"] = "float16"
             g_meta.attrs["n_samples"] = np.int64(n)
@@ -196,6 +198,27 @@ def _convert_one_shard(
         return "wrote"
 
 
+def _stamp_stats_sha256(dst: Path, expected_sha: str, *, overwrite: bool) -> str:
+    """Write metadata.stats_sha256 onto an already-converted shard (no data rewrite)."""
+    with h5py.File(dst, "r+") as f:
+        if "metadata" not in f or not bool(f["metadata"].attrs.get("normalized", False)):
+            raise ValueError(f"{dst}: not a pre-normalized shard, refuse to stamp")
+        attrs = f["metadata"].attrs
+        current = attrs.get("stats_sha256", None)
+        if current is not None:
+            cur = current.decode() if isinstance(current, (bytes, np.bytes_)) else str(current)
+            if cur == expected_sha and not overwrite:
+                return "skip"
+            if cur != expected_sha and not overwrite:
+                raise ValueError(
+                    f"{dst}: existing stats_sha256={cur} != current stats {expected_sha}. "
+                    "Pass --overwrite if you intentionally restamp after confirming the "
+                    "shard was converted with this stats file."
+                )
+        attrs["stats_sha256"] = expected_sha
+    return "stamped"
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Normalize training HDF5 to fp16 z-score shards")
     p.add_argument("--src_hdf5_root", type=str, default=str(HDF5_ROOT_RAW))
@@ -211,11 +234,44 @@ def main() -> None:
         action="store_true",
         help="只检查 dst 是否覆盖 src 的全部 shard/样本，不写文件",
     )
+    p.add_argument(
+        "--stamp_stats",
+        action="store_true",
+        help="给已转换 shard 写入 metadata.stats_sha256（不重写 data），供 Dataset 运行时校验",
+    )
     args = p.parse_args()
 
     src_root = Path(args.src_hdf5_root)
     dst_root = Path(args.dst_hdf5_root)
     stats_file = Path(args.stats_file)
+
+    if args.stamp_stats:
+        mean, std = _load_norm_stats(stats_file)
+        expected_sha = stats_content_sha256(mean, std)
+        print(f"dst={dst_root}")
+        print(f"stats={stats_file}")
+        print(f"stats_sha256={expected_sha}")
+        files: list[Path] = []
+        for season in args.seasons:
+            season_dir = dst_root / season
+            if not season_dir.is_dir():
+                continue
+            files.extend(sorted(season_dir.glob("shard_*.h5")))
+        if args.only_shard:
+            files = [p for p in files if p.name == args.only_shard]
+        if not files:
+            raise SystemExit(f"No shard_*.h5 found under {dst_root} seasons={args.seasons}")
+        n_stamped = n_skip = 0
+        for k, dp in enumerate(files, start=1):
+            status = _stamp_stats_sha256(dp, expected_sha, overwrite=bool(args.overwrite))
+            if status == "skip":
+                n_skip += 1
+            else:
+                n_stamped += 1
+            print(f"[{k}/{len(files)}] {status} {dp.relative_to(dst_root)}")
+        print(f"Done. stamped={n_stamped} skip={n_skip} dst={dst_root}")
+        return
+
     shards = _list_src_shards(src_root, list(args.seasons), args.only_shard)
     if not shards:
         raise SystemExit(f"No shard_*.h5 found under {src_root} seasons={args.seasons}")

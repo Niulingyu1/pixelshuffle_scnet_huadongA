@@ -1,4 +1,7 @@
 #!/bin/bash
+# 归档（2026-09-18）：正式长跑不走 Slurm。
+# 现行入口：bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
+# 本文件仅作历史参考，不要当现行命令。
 #SBATCH --job-name=downscale_train_ddp1n
 #SBATCH --partition=qdagnormal
 #SBATCH --nodes=1

@@ -1,7 +1,8 @@
 # 降尺度训练：分析梳理与下一步行动
 
-日期：2026-09-12（数据管线于 2026-09-18 增加预标准化 fp16 副本，见第 1.2 节）  
-范围：当前仓库脚本与任务逻辑、迁移遗留问题、损失函数/验证口径、训练优化路径  
+日期：2026-09-18  
+范围：当前仓库脚本与任务逻辑、预标准化 fp16、损失函数/验证口径、训练优化路径  
+正式长跑：SCNet 控制台 `scripts/launch_platform_train.sh`（8 卡 `batch_size=1`）。`slurm/` 不用。  
 数据现状（2026-09-18 已切训练默认路径）：
 
 - 训练数据：`/public/home/acd7koea4a/hdf5_norm_fp16`（`paths.HDF5_ROOT`），153 shard / 14965 样本 / 533GB，磁盘 **fp16 预标准化**，`metadata.normalized=True`
@@ -255,107 +256,71 @@ python train.py --base_ch 256 --no_cbam --hr_aux_mode stage1 --norm_type group \
 
 登录节点不要直接跑训练。下面按顺序执行。
 
-### 第 0 步：确认分区（现在就能做）
+### 第 0 步：确认走控制台，不要 `sbatch`
 
-`slurm/*.slurm` 里的 `--partition=qdagnormal` 是占位。登录节点此前查不到本账号可见分区，提交前必须改成真实分区：
+正式长跑入口是 SCNet「模型训练」控制台 + `scripts/launch_platform_train.sh`。
+`slurm/*.slurm` 已归档，本仓库不用。
+
+控制台：每实例加速卡数量 = 8（或先 4），实例数 = 1，启动命令：
 
 ```bash
-sinfo
-sacctmgr show assoc user=$USER format=account,partition%20
+bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
 ```
 
-两处都要改：
+`NPROC_PER_NODE` 必须等于「每实例加速卡数量」。8 卡保持 `--batch_size 1`。
 
-- `slurm/train_smoke_test.slurm`
-- `slurm/train_gpu.slurm`
-
-### 第 1 步：计算节点冒烟（数据未齐时的唯一训练动作）
-
-目的：在真实 GPU 上验证前向/反向/存盘/`manifests`/`MAE_val_physical/PRE`/`best_resource.pt` 都通，而不是出有意义的精度。
+### 第 1 步：计算节点冒烟（验证管线，不是精度）
 
 ```bash
-cd /public/home/acd7koea4a/work
-sbatch slurm/train_smoke_test.slurm
-```
-
-等价命令（脚本内部实际执行的是）：
-
-```bash
-python -u train.py \
-    --hdf5_root /public/home/acd7koea4a/work/smoke_test_data \
-    --seasons MAM \
-    --manifests cra1p5_full \
-    --val_fraction 0.1 \
-    --epochs 3 --val_interval 1 \
-    --batch_size 1 --accum_steps 2 --warmup_steps 5 \
-    --num_workers 2 \
-    --early_stop_patience 0 --save_top_k 1 \
-    --run_dir runs/smoke_cra1p5_full_0038
+bash /public/home/acd7koea4a/work/scripts/launch_platform_smoke_single.sh
+# 多卡：
+bash /public/home/acd7koea4a/work/scripts/launch_platform_smoke_ddp.sh
 ```
 
 通过标准：
 
 - 3 个 epoch 正常结束，无 OOM
 - 出现 `Loss/train`、`Loss/val`
-- 出现 `MAE_val_physical/PRE`，量级应是 mm/day，不应只是个位数 log1p 误差被误当成物理误差
-- `checkpoints/` 下有 `best.pt`；若 wind10/FSDS 有改进，还会有 `best_resource.pt`
-
-查看：
-
-```bash
-tail -f logs/slurm_smoke_<jobid>.out
-tensorboard --logdir runs/smoke_cra1p5_full_0038
-```
+- 出现 `MAE_val_physical/PRE`
+- `checkpoints/` 下有 `best.pt`
 
 冒烟失败先修管线，不要开始全量。
 
-### 第 2 步：等正式数据上传完毕后做完整性检查
+### 第 2 步：全量 1 epoch 探测（数据已齐）
 
-上传结束后先不要立刻开 100 epoch。建议在计算节点或低负载环境做轻量检查（读元数据，不要在登录节点扫全部大文件）：
+训练数据已在 `/public/home/acd7koea4a/hdf5_norm_fp16`（153 shard / 14965 样本）。
+开 100 epoch 前用正式架构跑一遍全量读盘 / 显存 / `validate()` / 落盘：
 
-1. 四季目录是否齐全：`MAM/JJA/SON/DJF`
-2. 是否还有 `*.raysync.uploading` 残留
-3. 每个 `shard_*.h5` 能否打开，且含 `data/x`、`data/y`、`data/dates`
-4. 样本总数是否与预期年份/季节大致相符
-5. 决定是否加 `--manifests cra1p5_full`（目录里若可能混入其它 tag 或半成品，建议加上）
+```bash
+bash /public/home/acd7koea4a/work/scripts/launch_platform_train_copy.sh
+```
 
 ### 第 3 步：第一版正式训练（默认全量配置，不要同时改损失）
 
-数据齐、冒烟通过后：
-
 ```bash
-cd /public/home/acd7koea4a/work
-# 先改好 --partition
-sbatch slurm/train_gpu.slurm
+bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
 ```
 
 这版使用当前正式配置（脚本已写死，不要改回代码 CLI 默认架构）：
 
 - `base_ch=256`，`--no_cbam`，`--hr_aux_mode stage1`，`--norm_type group`，`--ema_decay 0.999`
 - v2 损失默认值（面积加权 TailMAE + PatchExtreme 0.1 + WPS 0.05 + Phys 0.02）
-- `epochs=100`，`batch_size=1`，`accum_steps=4`（单卡），`val_fraction=0.2`
+- `epochs=100`，`batch_size=1`，`accum_steps=2`（8 卡），`val_fraction=0.2`
+- `--manifests cra1p5_full`，`--warmup_ratio 0.03`
 - 早停 patience=20
-- 输出：`runs/exp_prod_single_gpu`
+- 输出：`runs/exp_prod_ddp_platform`
 
-有多卡时，优先改用 `slurm/train_ddp_single_node.slurm` 或平台脚本 `scripts/launch_platform_train.sh`。
-
-开跑后立刻根据日志重算 warmup：
-
-```
-LR schedule: ... (total optimizer steps ≈ N)
-```
-
-若 N 很大而 warmup 仍是 100，下一版（或 resume 前重启）改为约 `0.03N ~ 0.05N`。
+脚本已带 `--warmup_ratio 0.03`，不必再按日志手工回填 `warmup_steps`。
 
 ### 第 4 步：第一版跑稳后再做风光加强对照
 
-不要和第一版并行改架构。单独开一个 run：
+不要和第一版并行改架构。单独开一个 run（仍走控制台，改 `run_dir` 与 lambda）：
 
 ```bash
 python -u train.py \
-    --hdf5_root /public/share/acd7koea4a/hdf5 \
+    --hdf5_root /public/home/acd7koea4a/hdf5_norm_fp16 \
     --manifests cra1p5_full \
-    --epochs 100 --batch_size 1 --accum_steps 4 --val_fraction 0.2 \
+    --epochs 100 --batch_size 1 --accum_steps 2 --val_fraction 0.2 \
     --num_workers 4 --early_stop_patience 20 \
     --no_cbam --hr_aux_mode stage1 --norm_type group \
     --ema_decay 0.999 --warmup_ratio 0.03 \
@@ -373,7 +338,7 @@ python -u train.py \
 
 顺序建议：
 
-1. 多卡 DDP（平台 `launch_platform_train.sh` 或 `slurm/train_ddp_single_node.slurm`）
+1. 正式长跑已是多卡 DDP（`launch_platform_train.sh`）；不要再走 `slurm/`
 2. 按年份划分验证集（若目标是外推到未见年 / CESM）
 3. 再单独调 `--lambda_patch_extreme` / `--lambda_wps`
 4. `--compile`（先冒烟验证）
@@ -383,10 +348,10 @@ python -u train.py \
 
 ## 7. 提交前检查清单
 
-- [ ] 已把 slurm 的 `--partition` 改成账号真实可用分区
-- [ ] 不在登录节点跑 `train.py`
-- [ ] 冒烟使用 `smoke_test_data` + `--manifests cra1p5_full`，不要指向正在上传的整个 `hdf5/MAM`
-- [ ] 正式训练前确认没有 `.raysync.uploading` 半成品被 glob 进来
+- [ ] 启动命令是 `bash .../scripts/launch_platform_train.sh`，不要 `sbatch`
+- [ ] `NPROC_PER_NODE` 等于控制台「每实例加速卡数量」；8 卡 `--batch_size 1`
+- [ ] 不要 `source env/activate.sh`（用镜像自带 Python）
+- [ ] 冒烟用 `launch_platform_smoke_*.sh`；全量探测用 `launch_platform_train_copy.sh`
 - [ ] 第一版正式训练使用 v2 默认损失，不叠加 FFT/Grad，不改回 `--lambda_extreme` / 通道偏置
 - [ ] 选模型看 `best.pt` / `Loss/val`；看风光看 `best_resource.pt` / `MAE_val_extreme/*`
 - [ ] 看降水精度时看 `MAE_val_physical/PRE`，不要只看 `MAE_val/PRE`
@@ -423,61 +388,46 @@ python -u train.py \
 
 | 调整 | 落地方式 |
 | --- | --- |
-| 有效 batch 与 BN 噪声 | 已切 `--norm_type group`（不再依赖 batch 维统计量），同时多卡 DDP 下 `--batch_size` 由 1 提到 2 |
+| 有效 batch 与 BN 噪声 | 已切 `--norm_type group`（不再依赖 batch 维统计量）；8 卡保持 `--batch_size 1` |
 | 按真实步数重算 warmup | `--warmup_ratio 0.03` |
 | 放宽验证频率 | `--val_interval 2` |
 
-### 8.3 正式训练命令（已更新到 slurm 脚本，用户自行在计算节点提交）
-
-单节点多卡（首选，`slurm/train_ddp_single_node.slurm`）：
+### 8.3 正式训练命令（控制台，不用 Slurm）
 
 ```bash
-cd /public/home/acd7koea4a/work
-# 先确认并改好 --partition（sinfo / sacctmgr show assoc user=$USER）
-sbatch slurm/train_ddp_single_node.slurm
+bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
 ```
 
-等价命令（脚本内部实际执行）：
+脚本内部等价命令：
 
 ```bash
-torchrun --nnodes=1 --nproc_per_node=8 train.py \
-    --hdf5_root /public/share/acd7koea4a/hdf5 \
-    --epochs 100 --batch_size 2 --accum_steps 2 --val_fraction 0.2 --val_interval 2 \
+torchrun --nnodes="${WORLD_SIZE:-1}" --nproc_per_node="${NPROC_PER_NODE:-8}" \
+    --node_rank="${RANK:-0}" --master_addr="${MASTER_ADDR:-127.0.0.1}" \
+    --master_port="${MASTER_PORT:-23456}" \
+    train.py \
+    --hdf5_root /public/home/acd7koea4a/hdf5_norm_fp16 \
+    --seasons MAM JJA SON DJF --manifests cra1p5_full \
+    --epochs 100 --batch_size 1 --accum_steps 2 --val_fraction 0.2 --val_interval 2 \
     --num_workers 4 \
     --no_cbam --hr_aux_mode stage1 \
     --norm_type group --ema_decay 0.999 \
     --warmup_ratio 0.03 \
     --early_stop_patience 20 \
-    --run_dir runs/exp_prod_ddp_1node
+    --run_dir runs/exp_prod_ddp_platform
 ```
 
-多节点扩展：`slurm/train_ddp_multi_node.slurm`（同一套参数，先跑通单节点再扩）。
-单卡回退（无多卡资源时）：`slurm/train_gpu.slurm`（同一套参数，`--batch_size 1 --accum_steps 4`）。
+**建议先做的冒烟 / 探测**：
 
-**建议先做的两步冒烟**（单个 shard，16 个样本，验证管线而非精度）：
+1. `scripts/launch_platform_smoke_single.sh` / `smoke_ddp.sh`：16 样本管线冒烟
+2. `scripts/launch_platform_train_copy.sh`：全量 1 epoch，确认读盘 / 显存 / `validate()` / 落盘
+3. 可选 `scripts/launch_platform_short_8gpu.sh`：8 卡、2 epoch
 
-1. `slurm/train_smoke_test.slurm`：单卡，验证正式架构开关（`--no_cbam --hr_aux_mode stage1
-   --norm_type group --ema_decay 0.999 --warmup_ratio`）在真实 GPU 上跑通、日志/checkpoint
-   字段齐全。
-2. `slurm/train_smoke_test_ddp.slurm`：2 卡 DDP，验证分布式路径（进程组/`DistributedSampler`/
-   梯度同步/验证指标跨 rank 聚合/`best.pt` 落盘）本身没问题，再放心扩到 8 卡。
+若通过后想单独验证 `--compile`：先在冒烟脚本上追加 `--compile` 单独跑一次，确认无异常再加进正式命令。`slurm/*.slurm` 已归档，不要 `sbatch`。
 
-若通过后想单独验证 `--compile`：先在 `train_smoke_test_ddp.slurm` 上追加 `--compile` 单独跑
-一次对比（不要和其它新变量一起引入），确认无异常再加进正式命令。
+### 8.4 推理（本轮暂缓）
 
-### 8.4 推理时如何取到这次训练的权重
-
-正式 checkpoint 架构变了（`use_cbam=False, hr_aux_mode=stage1, norm_type=group`），`infer.py`
-用 `--auto_model_cfg` 会自动识别，不需要手动传架构参数；若训练开了 EMA，推荐加 `--use_ema`
-使用 `model_ema`（部署权重）而非训练用的在线权重：
-
-```bash
-python infer.py --ckpt runs/exp_prod_ddp_1node/checkpoints/best.pt \
-    --auto_model_cfg --use_ema \
-    --hdf5_root /public/share/acd7koea4a/hdf5 --seasons DJF \
-    --out_dir infer_out_prod --output_mode per_sample --output_format nc \
-    --lon_convention neg180_180 --output_space physical --amp_bf16
-```
+测试集 HDF5 尚未就绪，正确文件到位后再改 `infer.py` 默认 `--hdf5_root` 为 `hdf5_test`。
+在此之前不要跑推理，也**禁止**把 `--hdf5_root` 指到 `hdf5_norm_fp16`。
 
 ---
 
@@ -489,13 +439,12 @@ python infer.py --ckpt runs/exp_prod_ddp_1node/checkpoints/best.pt \
 | 数据集 | `/public/home/acd7koea4a/work/dataset.py` |
 | 模型 | `/public/home/acd7koea4a/work/model.py` |
 | 路径配置 | `/public/home/acd7koea4a/work/paths.py` |
-| 推理入口 | `/public/home/acd7koea4a/work/infer.py` |
-| 说明文档（已与代码对齐） | `/public/home/acd7koea4a/work/DOWNSCALE_README.md` |
-| 冒烟 slurm（单卡） | `/public/home/acd7koea4a/work/slurm/train_smoke_test.slurm` |
-| 冒烟 slurm（2 卡 DDP） | `/public/home/acd7koea4a/work/slurm/train_smoke_test_ddp.slurm` |
-| **正式训练 slurm（首选，单节点多卡 DDP）** | `/public/home/acd7koea4a/work/slurm/train_ddp_single_node.slurm` |
-| 正式训练 slurm（多节点扩展） | `/public/home/acd7koea4a/work/slurm/train_ddp_multi_node.slurm` |
-| 正式训练 slurm（单卡回退） | `/public/home/acd7koea4a/work/slurm/train_gpu.slurm` |
+| **正式长跑（唯一）** | `scripts/launch_platform_train.sh` |
+| 冒烟 | `scripts/launch_platform_smoke_single.sh`、`smoke_ddp.sh` |
+| 全量 1 epoch 探测 | `scripts/launch_platform_train_copy.sh` |
+| 8 卡短跑 | `scripts/launch_platform_short_8gpu.sh` |
+| 说明文档 | `/public/home/acd7koea4a/work/DOWNSCALE_README.md` |
 | 冒烟数据 | `/public/home/acd7koea4a/work/smoke_test_data` |
 | 正式 HDF5 根目录 | `/public/home/acd7koea4a/hdf5_norm_fp16`（fp32 备份：`/public/share/acd7koea4a/hdf5`） |
 | 归一化统计 | `/public/share/acd7koea4a/states/global_stats_state.json` |
+| slurm/ | 归档，不用 |

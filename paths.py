@@ -60,9 +60,17 @@ def _resolve_stats_file() -> Path:
 
 STATS_FILE = _resolve_stats_file()
 
+def _resolve_hdf5_norm() -> Path:
+    """预标准化 fp16：优先共享盘副本（家目录配额更紧），否则家目录原件。"""
+    for p in (DATA_ROOT / "hdf5_norm_fp16", HOME / "hdf5_norm_fp16"):
+        if _is_usable_dir(p):
+            return p
+    return DATA_ROOT / "hdf5_norm_fp16"
+
+
 # HDF5 数据集（按用途分目录，从旧机迁移后放到对应子目录）
 HDF5_ROOT_RAW  = DATA_ROOT / "hdf5"            # 原始 fp32、未标准化（备份）
-HDF5_ROOT_NORM = HOME / "hdf5_norm_fp16"       # 预标准化 fp16（全量转换完成）
+HDF5_ROOT_NORM = _resolve_hdf5_norm()          # 预标准化 fp16（share 优先，家目录为生成原件）
 HDF5_ROOT = HDF5_ROOT_NORM
 HDF5_HALF = DATA_ROOT / "hdf5_half"     # 半量训练集 2000–2019
 HDF5_MINI = DATA_ROOT / "hdf5_mini"     # 调试用小集（保持 fp32 在线标准化）

@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -52,12 +53,13 @@ SEASONS   = ["MAM", "JJA", "SON", "DJF"]
 
 _NORM_MEAN: np.ndarray | None = None   # (8,) float32
 _NORM_STD:  np.ndarray | None = None   # (8,) float32
+_STATS_CACHE_PATH: Path | None = None
 
 
 def _load_norm_stats() -> tuple[np.ndarray, np.ndarray]:
-    global _NORM_MEAN, _NORM_STD
-    if _NORM_MEAN is None:
-        stats_path = Path(STATS_FILE)
+    global _NORM_MEAN, _NORM_STD, _STATS_CACHE_PATH
+    stats_path = Path(STATS_FILE)
+    if _NORM_MEAN is None or _STATS_CACHE_PATH != stats_path:
         if not stats_path.is_file():
             raise FileNotFoundError(
                 f"找不到归一化统计文件: {stats_path}。"
@@ -85,7 +87,67 @@ def _load_norm_stats() -> tuple[np.ndarray, np.ndarray]:
             stds.append(std)
         _NORM_MEAN = np.array(means, dtype=np.float32)
         _NORM_STD  = np.array(stds,  dtype=np.float32)
+        _STATS_CACHE_PATH = stats_path
     return _NORM_MEAN, _NORM_STD
+
+
+def stats_content_sha256(mean: np.ndarray, std: np.ndarray) -> str:
+    """Fingerprint of the 8-variable z-score (mean, std), independent of file path/mtime.
+
+    Used to bind pre-normalized HDF5 shards to the stats they were converted with.
+    Path/mtime are not enough: a rewritten ``global_stats_state.json`` can keep the
+    same path, and a copy can change mtime without changing numbers.
+    """
+    payload = json.dumps(
+        {
+            "variables": VARIABLES,
+            "mean": [float(x) for x in np.asarray(mean, dtype=np.float32).ravel()],
+            "std": [float(x) for x in np.asarray(std, dtype=np.float32).ravel()],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _h5_attr_str(attrs: h5py.AttributeManager, key: str) -> str | None:
+    if key not in attrs:
+        return None
+    v = attrs[key]
+    if isinstance(v, (bytes, np.bytes_)):
+        return v.decode()
+    s = str(v).strip()
+    return s or None
+
+
+def _assert_pre_normalized_stats(
+    shard_stats_sha: dict[str, str | None],
+    expected_sha: str,
+    stats_file: Path,
+) -> None:
+    """Hard-fail if a pre-normalized shard was not converted with *this* stats file."""
+    missing = [p for p, sha in shard_stats_sha.items() if not sha]
+    if missing:
+        raise ValueError(
+            "预标准化 shard 缺少 metadata.stats_sha256，无法确认是否与当前 "
+            f"{stats_file} 一致。请先对数据目录运行：\n"
+            "  python normalize_hdf5_fp16.py --stamp_stats --dst_hdf5_root <该 hdf5_root>\n"
+            f"缺标记例: {missing[:3]}"
+        )
+    uniq = set(shard_stats_sha.values())
+    if len(uniq) > 1:
+        raise ValueError(
+            "预标准化 shard 的 stats_sha256 不一致（转换时用了不同的 mean/std）。"
+            f" fingerprints={sorted(sha for sha in uniq if sha)[:3]}"
+        )
+    got = next(iter(uniq))
+    if got != expected_sha:
+        raise ValueError(
+            f"预标准化数据与当前 stats 不匹配：shard stats_sha256={got}，"
+            f"当前 {stats_file} → {expected_sha}。"
+            "不要用这份 HDF5 训练/反标准化；请改回转换时的 global_stats_state.json，"
+            "或重新跑 normalize_hdf5_fp16.py。"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -253,12 +315,13 @@ def _build_index(
     hdf5_root: Path,
     seasons: Sequence[str],
     manifests: Sequence[str] | None = None,
-) -> tuple[list[tuple[str, int]], bool]:
+) -> tuple[list[tuple[str, int]], bool, dict[str, str | None]]:
     """
-    Returns (index, pre_normalized).
+    Returns (index, pre_normalized, shard_stats_sha).
 
     index: flat list of (hdf5_file_path, sample_idx_within_file).
     pre_normalized: True if every included shard is marked normalized.
+    shard_stats_sha: path → metadata.stats_sha256 for normalized shards (None if missing).
 
     将各季节目录下 shard_*.h5 展平为全局样本索引，供 Dataset.__getitem__ 随机访问。
     同一 hdf5_root 下不得混用预标准化 / 未标准化 shard。
@@ -276,6 +339,7 @@ def _build_index(
     allowed = set(manifests) if manifests else None
     index: list[tuple[str, int]] = []
     flags: dict[str, bool] = {}
+    shard_stats_sha: dict[str, str | None] = {}
     for season in seasons:
         season_dir = hdf5_root / season
         if not season_dir.exists():
@@ -293,9 +357,14 @@ def _build_index(
             with h5py.File(h5path, "r") as f:
                 n = f["data/x"].shape[0]
                 normalized = False
+                stats_sha = None
                 if "metadata" in f:
-                    normalized = bool(f["metadata"].attrs.get("normalized", False))
+                    attrs = f["metadata"].attrs
+                    normalized = bool(attrs.get("normalized", False))
+                    stats_sha = _h5_attr_str(attrs, "stats_sha256")
             flags[str(h5path)] = bool(normalized)
+            if normalized:
+                shard_stats_sha[str(h5path)] = stats_sha
             index.extend((str(h5path), i) for i in range(n))
     uniq = set(flags.values())
     if len(uniq) > 1:
@@ -307,7 +376,7 @@ def _build_index(
             f"normalized=False 例: {false_files[:3]}"
         )
     pre_normalized = bool(next(iter(uniq))) if uniq else False
-    return index, pre_normalized
+    return index, pre_normalized, shard_stats_sha
 
 
 # ---------------------------------------------------------------------------
@@ -346,10 +415,15 @@ class DownscaleDataset(Dataset):
         STATS_FILE = Path(stats_file)
 
         self.hdf5_root = Path(hdf5_root)
-        self.index, self.pre_normalized = _build_index(self.hdf5_root, seasons, manifests)
+        self.index, self.pre_normalized, shard_stats_sha = _build_index(
+            self.hdf5_root, seasons, manifests
+        )
 
         # 全局 mean/std，与 HDF5 中 8 变量顺序一致（反标准化 / 未标准化路径仍需要）
         self.norm_mean, self.norm_std = _load_norm_stats()   # (8,) each
+        if self.pre_normalized:
+            expected_sha = stats_content_sha256(self.norm_mean, self.norm_std)
+            _assert_pre_normalized_stats(shard_stats_sha, expected_sha, Path(STATS_FILE))
 
         # fork 子进程后写时复制，多 worker 共享只读大数组内存
         # lr_static 不再拼入 x_lr，但保留加载供子类或外部调用

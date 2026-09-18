@@ -1,4 +1,6 @@
 #!/bin/bash
+# 归档（2026-09-18）：冒烟请用 scripts/launch_platform_smoke_ddp.sh。
+# 现行长跑入口：bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
 #SBATCH --job-name=downscale_smoke_ddp
 #SBATCH --partition=qdagnormal
 #SBATCH --nodes=1

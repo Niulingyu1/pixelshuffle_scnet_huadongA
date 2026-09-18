@@ -1,7 +1,7 @@
-# 全量训练指导（基于 2026-09-12 冒烟测试）
+# 全量训练指导
 
-日期：2026-09-12（损失方案于 2026-09-17 更新为 v2，见第 4 节）  
-范围：SCNet「模型训练」控制台 + BW1000（海光 DCU / DTK）；A800 入口见 `scripts/launch_platform_*.sh`  
+日期：2026-09-18（正式入口冻结：控制台 `launch_platform_train.sh`，8 卡 `batch_size=1`）  
+范围：SCNet「模型训练」控制台。`slurm/*.slurm` 已归档，不用。  
 依据：单卡冒烟 `runs/smoke_cra1p5_full_0038`、2 卡 DDP 冒烟 `runs/smoke_ddp_cra1p5_full_0038`
 
 冒烟只验证管线（前向 / 反向 / 存盘 / DDP 聚合），**16 个样本上的 MAE 没有业务意义**。
@@ -139,14 +139,14 @@ FFT / Grad / 旧版 SpatialExtreme 默认关
 | 资源 | batch / accum | 启动 |
 | --- | --- | --- |
 | 单卡回退 | `1 / 4` | `unset` 分布式变量 + `python -u` |
-| **推荐：1 实例 × 4 卡** | `1 / 2` | `torchrun --nproc_per_node=4` |
-| 稳了再试：1 实例 × 8 卡 | 先 `1 / 2`，显存够再 `2 / 2` | `torchrun --nproc_per_node=8` |
+| 1 实例 × 4 卡 | `1 / 2` | `torchrun --nproc_per_node=4` |
+| **正式：1 实例 × 8 卡** | `1 / 2` | `launch_platform_train.sh`（`NPROC_PER_NODE=8`） |
 | 多实例 / 多节点 | 先不要 | 单节点 8 卡通了再扩 |
 
 有效全局 batch = `batch_size × accum_steps × 卡数`。
 
 - 4 卡 × 1 × 2 = 4，和单卡 `1 × 4` 同量级，学习率先不动（`2e-4`）
-- 8 卡若把 `batch_size` 提到 2，全局 batch 变成 32，需要观察 `Loss/val` 是否变抖；必要时再单独调 lr，不要和第一版绑死
+- 8 卡保持 `batch_size=1`（全局 batch = 16）；不要提到 2
 
 ---
 
@@ -157,7 +157,7 @@ FFT / Grad / 旧版 SpatialExtreme 默认关
 | 项 | 值 |
 | --- | --- |
 | 加速卡 | BW1000 |
-| 每实例卡数 | 4（稳了再试 8） |
+| 每实例卡数 | 8（先 4 也可以，须与 `NPROC_PER_NODE` 一致） |
 | 实例数 | 1 |
 | 镜像 | 与冒烟成功相同的 DTK 镜像 |
 | 启动命令 | `bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh`（2 卡时先 `export NPROC_PER_NODE=2`） |

@@ -32,6 +32,7 @@ norm_fp16_logs/
 *.hdf5
 *.nc
 smoke_test_data/
+smoke_norm_fp16_data/
 
 # IDE & editor
 .vscode/

@@ -3,7 +3,7 @@
 日期：2026-09-18  
 目的：训练可以读预标准化 fp16；**推理必须继续读「训练域物理量 + 在线 z-score」**。两边必须共用同一份统计量、同一套变换顺序，否则会出现静默错结果（重复 z-score / 重复 log1p），很难从 loss 曲线看出来。
 
-相关代码：`dataset.py`（`_load_norm_stats`、`_zscore_vars`、`is_pre_normalized_shard`）、`normalize_hdf5_fp16.py`、`infer.py`（`_prep_norm_tensors`、HDF5 护栏）、`train.py`（`get_norm_stats` 反标准化）、`prepare_hdf5_cesm.py`。
+相关代码：`dataset.py`（`_load_norm_stats`、`stats_content_sha256`、`is_pre_normalized_shard`）、`normalize_hdf5_fp16.py`、`infer.py`（`_prep_norm_tensors`、HDF5 护栏）、`train.py`（`get_norm_stats` 反标准化）、`prepare_hdf5_cesm.py`。
 
 ---
 
@@ -53,8 +53,9 @@ HDF5 存储单位（训练域）
 | 环节 | 实现 |
 | --- | --- |
 | 同一份 mean/std | 全部走 `dataset._load_norm_stats()` → `paths.STATS_FILE`（优先 `states/global_stats_state.json`） |
-| 同一套 z-score（训练 + 离线转换） | `dataset._zscore_vars`；`normalize_hdf5_fp16.py` **import 该函数**，不抄公式 |
+| 同一套 z-score（训练 + 离线转换） | 公式都是 `(x-mean)/std`。Dataset `__getitem__` 对未标准化 shard 内联计算；`normalize_hdf5_fp16.py` 用 `_zscore_to_fp16`。mean/std 与 `dataset._load_norm_stats` 同口径（`var_all` → `sqrt(M2/n)`） |
 | 训练读预标准化数据 | `DownscaleDataset` 见 `metadata.normalized` 则跳过 z-score，只转 bf16 |
+| 预标准化与 stats 强绑定 | shard `metadata.stats_sha256` = 8 变量 mean/std 的内容指纹（不是路径、不是 mtime）。Dataset 在 `pre_normalized=True` 时启动即比对；缺标记、shard 之间不一致、或和当前 `STATS_FILE` 对不上都会直接报错。已转换数据补标记：`python normalize_hdf5_fp16.py --stamp_stats --dst_hdf5_root /public/share/acd7koea4a/hdf5_norm_fp16`。家目录那份只读、未 stamp，不要对它 `--stamp_stats`；`paths.HDF5_ROOT` 优先 share 已 stamp 副本 |
 | 训练反标准化（Phys/WPS/验证 MAE） | `dataset.get_norm_stats()`，与上面同一组数组 |
 | 推理 z-score | `_prep_norm_tensors()` 调用 `ds._load_norm_stats()`，再 `(x_t - mean) / std`（torch 手写，公式相同） |
 | 推理防二次 z-score | `is_pre_normalized_shard` 为 True 则退出 |
@@ -96,6 +97,6 @@ python infer.py --input_source hdf5 \
 
 ## 5. 仍未收成单一函数的部分（以后改脚本时）
 
-推理的 `(x_t - mean) / std` 仍是 torch 手写，没有调用 `_zscore_vars`。数值与 numpy 版相同，但两份实现。`train.py` 的反标准化与 `infer._to_output_space`（含 `expm1`）也未抽成共用函数。
+推理的 `(x_t - mean) / std` 仍是 torch 手写；离线转换是 numpy `_zscore_to_fp16`。数值与 Dataset 在线路径相同，但不是同一个函数。`train.py` 的反标准化与 `infer._to_output_space`（含 `expm1`）也未抽成共用函数。
 
-下一轮若要再收紧：给 numpy/torch 各提供 `zscore` / `zscore_inv`，`infer.py` 与 `train.py` 都改成调用。在此之前，**目录护栏 + 共用 `_load_norm_stats` 是防止推理出错的硬约束，不要删。**
+下一轮若要再收紧：给 numpy/torch 各提供 `zscore` / `zscore_inv`，`infer.py` 与 `train.py` 都改成调用。在此之前，**目录护栏 + 共用 `_load_norm_stats` + `stats_sha256` 运行时校验是防止训练/推理用错 stats 的硬约束，不要删。**

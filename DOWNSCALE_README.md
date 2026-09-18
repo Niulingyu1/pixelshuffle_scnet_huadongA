@@ -8,24 +8,34 @@
 | 项目   | 说明                                                                                                          |
 | ---- | ----------------------------------------------------------------------------------------------------------- |
 | 目标   | 全球约 1°（180×360）→ 约 0.1°（1801×3600），8 个变量：`TAS`, `PRE`, `wind10`, `Q`, `2M_RH`, `2M_TMAX`, `2M_TMIN`, `FSDS` |
-| HDF5 | 全量训练默认指向 `HDF5_ROOT_NORM`=`/public/home/acd7koea4a/hdf5_norm_fp16`：磁盘 `data/x`/`data/y` 为离线 z-score 后的 **float16**，`metadata.normalized=True`。原始备份仍在 `/public/share/acd7koea4a/hdf5`（`HDF5_ROOT_RAW`，fp32、未 z-score）。`hdf5_mini` / CESM 推理 HDF5 仍为未标准化物理量。`Dataset` 按 metadata 自动识别，出口 `x_lr`/`y_hr` 一律 **bfloat16**；`hr_aux` 保持 fp32。 |
+| HDF5 | 全量训练默认 `paths.HDF5_ROOT`：优先 `/public/share/acd7koea4a/hdf5_norm_fp16`，否则家目录同名目录。磁盘 `data/x`/`data/y` 为离线 z-score 后的 **float16**，`metadata.normalized=True`，`metadata.stats_sha256` 与当前 `STATS_FILE` 绑定。原始备份仍在 `/public/share/acd7koea4a/hdf5`（`HDF5_ROOT_RAW`，fp32、未 z-score）。`hdf5_mini` / CESM 推理 HDF5 仍为未标准化物理量。`Dataset` 按 metadata 自动识别，出口 `x_lr`/`y_hr` 一律 **bfloat16**；`hr_aux` 保持 fp32。 |
 | 预处理  | 写入原始 HDF5 前：`PRE` 为 `log1p`；`Q` 已 ×1000（g/kg）                                                                 |
 | 归一化  | `global_stats_state.json` 中 `var_all` 的 mean / `sqrt(M2/n)`。预标准化数据离线完成 z-score；未标准化数据仍在 `dataset.py` 在线做。**静态与 cos(SZA) 不归一化** |
 
 ### 1.1 离线 z-score + fp16 副本
 
-全量训练集已离线写成 `/public/home/acd7koea4a/hdf5_norm_fp16`（目录结构与文件名与原始 `hdf5/` 相同）：磁盘上 `data/x`/`data/y` 已是 z-score 后的 **float16**，`metadata.normalized=True`。`dataset.py` 读出后统一转为 **bfloat16** 再返回，与 `train.py` 的 `autocast(dtype=bfloat16)` 对齐；`hr_aux` 仍为在线 fp32。`hdf5_mini` / CESM 推理 HDF5 保持未标准化物理量。
+全量训练集已离线写成 fp16 预标准化副本（家目录生成、share 有拷贝；`paths.py` 优先 share）：磁盘上 `data/x`/`data/y` 已是 z-score 后的 **float16**，`metadata.normalized=True`。`dataset.py` 读出后统一转为 **bfloat16** 再返回，与 `train.py` 的 `autocast(dtype=bfloat16)` 对齐；`hr_aux` 仍为在线 fp32。`hdf5_mini` / CESM 推理 HDF5 保持未标准化物理量。
 
 ```bash
 python normalize_hdf5_fp16.py --dry_run
 python normalize_hdf5_fp16.py --check_complete
+# 给已转换 shard 写入 stats 内容指纹（不重写 data）；Dataset 启动时会校验
+python normalize_hdf5_fp16.py --stamp_stats --dst_hdf5_root /public/share/acd7koea4a/hdf5_norm_fp16
 python scripts/check_hdf5_norm_fp16.py \
     --src /public/share/acd7koea4a/hdf5 \
-    --dst /public/home/acd7koea4a/hdf5_norm_fp16 \
+    --dst /public/share/acd7koea4a/hdf5_norm_fp16 \
     --seasons MAM --manifests cra1p5_full --n_check 8
 ```
 
-`paths.py` 里 `HDF5_ROOT` 已指向 `HDF5_ROOT_NORM`。`infer.py --input_source hdf5` 若指向预标准化目录会直接报错，避免静默二次标准化。
+`paths.py` 里 `HDF5_ROOT` 指向 `HDF5_ROOT_NORM`。`infer.py --input_source hdf5` 若指向预标准化目录会直接报错，避免静默二次标准化。
+
+数据切换后的训练冒烟不要用已归档的 `slurm/train_smoke_test*.slurm`，用：
+
+```bash
+bash scripts/launch_platform_smoke_norm_single.sh   # 1 卡，1 个预标准化 shard
+bash scripts/launch_platform_smoke_norm_ddp.sh      # 2 卡 DDP
+bash scripts/launch_platform_train_copy.sh          # 全量 1 epoch 探测
+```
 
 2026-09-18 已在 BW1000（DTK torch 2.7.1）上跑通 `scripts/smoke_norm_fp16_step.py`：`pred`/`loss` 保持 bfloat16，前向+反向无 dtype 报错。正式训练用 `scripts/launch_platform_train.sh`（镜像自带 python，不要 conda）。
 
@@ -297,7 +307,7 @@ https://www.scnet.cn/help/docs/mainsite/ai/model-training/rdma/
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--norm_type {batch,group}` | `batch` | `ResBlock`/`InitConv`/`Head` 的归一化层。`group`=`nn.GroupNorm`（按通道分组、单样本内部统计，不依赖 batch 维），对 `--batch_size` 较小场景更稳健，但与 `batch` 版本的 checkpoint **不兼容**（层结构不同，需从头训练）。**正式训练已确定使用 `group`**（见第 9 节） |
-| `--compile` | 关闭 | 用 `torch.compile()` 包装模型（PyTorch 2.5.1 支持），可能带来 10%~30% 加速；与 gradient checkpointing / DDP / 本平台 DCU+RCCL 的组合兼容性未经充分验证，**默认关闭**，建议先在 `slurm/train_smoke_test_ddp.slurm` 上单独加一次验证再用于正式训练 |
+| `--compile` | 关闭 | 用 `torch.compile()` 包装模型（PyTorch 2.5.1 支持），可能带来 10%~30% 加速；与 gradient checkpointing / DDP 的组合兼容性未经充分验证，**默认关闭**，建议先在 `scripts/launch_platform_smoke_ddp.sh` 上单独加一次验证再用于正式训练 |
 | `--ema_decay` | `0.0`（关闭） | 模型权重指数滑动平均（如 `0.999`）。开启后验证阶段临时换用 EMA 权重（对小 batch/BN 噪声更稳健），checkpoint 额外保存 `model_ema`（部署/推理用）；`model` 字段仍是训练用的在线权重（用于正确 `--resume`） |
 | `--warmup_ratio` | 空（不生效） | 设置后自动用 `warmup_steps = round(warmup_ratio × total_steps)` 覆盖 `--warmup_steps`，不必先跑一次看日志里的 `total_steps` 再手动回填；建议 `0.03~0.05` |
 
@@ -316,10 +326,10 @@ bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
 - `--eval_only --resume <ckpt>` 同样支持分布式启动（用多卡加速大验证集的补算指标过程）。
 - 梯度累积 `--accum_steps` 与分布式 `world_size` 会同时放大有效 batch；调 `--lr`/`--warmup_steps` 时请按新的 global batch 重新核对。
 
-### 5.1.1 在 SCNet「模型训练」控制台任务中启动（容器/vcjob，非 Slurm sbatch）
+### 5.1.1 在 SCNet「模型训练」控制台启动（本仓库唯一正式入口）
 
-若不走 `sbatch`，而是在控制台 人工智能服务 → 模型训练 → 创建训练任务 里配置资源并提交
-（参考 https://www.scnet.cn/help/docs/mainsite/ai/model-training/ ），启动方式与 Slurm 不同：
+正式长跑走控制台 人工智能服务 → 模型训练 → 创建训练任务
+（参考 https://www.scnet.cn/help/docs/mainsite/ai/model-training/ ），不要用 `sbatch`。
 
 - 平台按「实例数」「每实例加速卡数量」调度容器，并自动为每个实例注入分布式环境变量
   （详见《环境变量列表》https://www.scnet.cn/help/docs/mainsite/ai/model-training/environment-variable/ ）：

@@ -3,7 +3,7 @@
 Usage:
   python scripts/check_hdf5_norm_fp16.py \\
       --src /public/share/acd7koea4a/hdf5 \\
-      --dst /public/home/acd7koea4a/hdf5_norm_fp16 \\
+      --dst /public/share/acd7koea4a/hdf5_norm_fp16 \\
       --seasons MAM --manifests cra1p5_full --n_check 8
 """
 

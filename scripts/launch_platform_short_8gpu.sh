@@ -13,7 +13,8 @@
 #     bash /public/home/acd7koea4a/work/scripts/launch_platform_short_8gpu.sh
 #
 # 多卡：保留平台注入的 WORLD_SIZE/RANK/MASTER_*，不要 unset。
-# 仍用 batch_size=1；单卡冒烟余量约 23 GiB，但 8 卡还有 NCCL 缓冲，不要这次就提 bs=2。
+# 仍用 batch_size=1（正式长跑也锁定 1）；8 卡还有 NCCL 缓冲，不要提到 2。
+# 数据走 paths.HDF5_ROOT（hdf5_norm_fp16），与 launch_platform_train.sh 一致。
 
 set -euo pipefail
 
@@ -68,7 +69,7 @@ torchrun \
     --master_addr="${MASTER_ADDR:-127.0.0.1}" \
     --master_port="${MASTER_PORT:-23456}" \
     train.py \
-    --hdf5_root /public/share/acd7koea4a/hdf5 \
+    --hdf5_root "$(python -c 'from paths import HDF5_ROOT; print(HDF5_ROOT)')" \
     --seasons MAM JJA SON DJF \
     --manifests cra1p5_full \
     --val_fraction 0.2 \

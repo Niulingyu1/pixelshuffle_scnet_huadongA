@@ -1,8 +1,9 @@
 #!/bin/bash
-# 正式配置的 1 epoch 全量路径探测（容器/vcjob）。
+# 全量路径 1 epoch 探测（容器/vcjob）。文件名带 copy，但不是正式长跑的副本。
 #
-# 架构与损失与 scripts/launch_platform_train.sh 相同，只把 --epochs 改成 1，
-# 用来确认全量 HDF5 可读、DDP 能走完 validate()/落盘。MAE 没有业务意义。
+# 正式 100 epoch 请用 scripts/launch_platform_train.sh。
+# 本脚本架构/损失与正式入口相同，只把 --epochs 改成 1，用来确认全量 HDF5 可读、
+# DDP 能走完 validate()/落盘。MAE 没有业务意义。
 # 架构冒烟（16 样本）请用 launch_platform_smoke_single.sh / smoke_ddp.sh。
 #
 # 启动命令：

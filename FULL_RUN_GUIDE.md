@@ -93,25 +93,23 @@ torch.OutOfMemoryError: HIP out of memory. Tried to allocate 15.82 GiB
 
 ## 3. 全量开跑前先核对数据
 
-2026-09-12 当晚共享盘状态（**当时还没齐**）：
+2026-09-18 训练数据已切到预标准化副本，四季齐全：
 
-| 季节 | shard 数量 | 备注 |
-| --- | --- | --- |
-| MAM | 39 | 仍有大量 `*.raysync.uploading` |
-| SON | 19 | |
-| JJA | 0 | |
-| DJF | 0 | |
+| 项 | 值 |
+| --- | --- |
+| 训练根目录 | `/public/home/acd7koea4a/hdf5_norm_fp16`（`paths.HDF5_ROOT`） |
+| 规模 | 153 shard / 14965 样本 / 533GB |
+| 磁盘 | fp16，已 z-score，`metadata.normalized=True` |
+| fp32 备份 | `/public/share/acd7koea4a/hdf5`（`HDF5_ROOT_RAW`，未 z-score） |
+| 归一化统计 | `/public/share/acd7koea4a/states/global_stats_state.json` |
 
-开 100 epoch 之前必须满足：
+开 100 epoch 之前仍建议确认：
 
 1. 四季目录齐全：`MAM / JJA / SON / DJF`
-2. 没有 `*.raysync.uploading`
+2. 没有 `*.h5.tmp` / 半成品
 3. 每个 `shard_*.h5` 能打开，且含 `data/x`、`data/y`、`data/dates`
-4. 加上 `--manifests cra1p5_full`，只吃白名单 tag，避免半成品 / 其它 tag 混入
-5. 先用全量路径做一次 **2～4 卡、1～2 epoch** 的短跑（验证读盘和显存），再拉到 100 epoch
-
-数据根目录：`/public/share/acd7koea4a/hdf5`  
-归一化统计：`/public/share/acd7koea4a/states/global_stats_state.json`
+4. 加上 `--manifests cra1p5_full`（正式脚本已写死）
+5. 先用 `scripts/launch_platform_train_copy.sh` 做全量 1 epoch 探测，再拉到 100 epoch
 
 ---
 
@@ -290,17 +288,7 @@ tail -f /public/home/acd7koea4a/work/logs/full_ddp_*.log
 | 降水真实误差 | `MAE_val_physical/PRE`（mm/day），不要只看 `MAE_val/PRE`（那是 log1p） |
 | 训练诊断 | `Loss/val_combined` 及各子项（不可跨 run 比大小） |
 
-推理：
-
-```bash
-python infer.py --ckpt runs/exp_prod_ddp_4gpu/checkpoints/best.pt \
-    --auto_model_cfg --use_ema \
-    --hdf5_root /public/home/acd7koea4a/hdf5_norm_fp16 --seasons DJF \
-    --out_dir infer_out_prod --output_mode per_sample --output_format nc \
-    --lon_convention neg180_180 --output_space physical --amp_bf16
-```
-
-`--auto_model_cfg` 会从 checkpoint 识别 `use_cbam=False`、`hr_aux_mode=stage1`、`norm_type=group`。开了 EMA 时加 `--use_ema`，用 `model_ema` 而不是在线权重。
+推理：测试集 HDF5 尚未就绪，本轮不跑 `infer.py`。以后默认目录是 `hdf5_test`（替换正确文件后），**禁止**把 `--hdf5_root` 指到 `hdf5_norm_fp16`。
 
 ---
 
@@ -318,11 +306,11 @@ python infer.py --ckpt runs/exp_prod_ddp_4gpu/checkpoints/best.pt \
 
 ## 8. 建议执行顺序
 
-1. 等四季 HDF5 传完，确认无 `*.raysync.uploading`
-2. 全量路径、2～4 卡、1～2 epoch 短跑（只验证读盘 / 显存 / 落盘）
-3. 同一套命令拉到 100 epoch（第一版，v2 默认损失）
+1. 控制台冒烟：`launch_platform_smoke_single.sh` / `smoke_ddp.sh`
+2. 全量 1 epoch 探测：`launch_platform_train_copy.sh`（只验证读盘 / 显存 / 落盘）
+3. 同一套正式入口拉到 100 epoch：`launch_platform_train.sh`（8 卡 `batch_size=1`）
 4. 第一版有数后，单独开 `--lambda_patch_extreme` / `--lambda_wps` 对照
-5. 再考虑：8 卡、`batch_size=2`、`--compile`、按年切验证集
+5. 再考虑：`--compile`、按年切验证集；不要把 8 卡 `batch_size` 提到 2
 
 ---
 
@@ -331,7 +319,8 @@ python infer.py --ckpt runs/exp_prod_ddp_4gpu/checkpoints/best.pt \
 | 用途 | 路径 |
 | --- | --- |
 | 训练入口 | `/public/home/acd7koea4a/work/train.py` |
-| 平台正式启动 | `scripts/launch_platform_train.sh` |
+| **正式长跑（唯一）** | `scripts/launch_platform_train.sh`（SCNet 控制台） |
+| 全量 1 epoch 探测 | `scripts/launch_platform_train_copy.sh` |
 | 平台冒烟 | `scripts/launch_platform_smoke_single.sh`、`launch_platform_smoke_ddp.sh` |
 | 平台 8 卡短跑 | `scripts/launch_platform_short_8gpu.sh` |
 | 历史纯 MAE 对齐 | `scripts/launch_platform_train_bw_a800_aligned_benchmark.sh` |

@@ -301,28 +301,18 @@ https://www.scnet.cn/help/docs/mainsite/ai/model-training/rdma/
 | `--ema_decay` | `0.0`（关闭） | 模型权重指数滑动平均（如 `0.999`）。开启后验证阶段临时换用 EMA 权重（对小 batch/BN 噪声更稳健），checkpoint 额外保存 `model_ema`（部署/推理用）；`model` 字段仍是训练用的在线权重（用于正确 `--resume`） |
 | `--warmup_ratio` | 空（不生效） | 设置后自动用 `warmup_steps = round(warmup_ratio × total_steps)` 覆盖 `--warmup_steps`，不必先跑一次看日志里的 `total_steps` 再手动回填；建议 `0.03~0.05` |
 
-**启动方式**：
+**启动方式**（正式长跑只走 SCNet 控制台，见第 5.1.1 / 第 9 节）：
 
 ```bash
-# 单节点多卡；正式架构 + v2 损失默认值。完整命令见第 9 节。
-torchrun --nnodes=1 --nproc_per_node=8 train.py \
-    --hdf5_root "$(python -c 'from paths import HDF5_ROOT; print(HDF5_ROOT)')" \
-    --epochs 100 --batch_size 1 --accum_steps 2 --val_fraction 0.2 --val_interval 2 \
-    --no_cbam --hr_aux_mode stage1 --norm_type group --ema_decay 0.999 \
-    --warmup_ratio 0.03 --early_stop_patience 20 \
-    --run_dir runs/exp_prod_ddp_1node
-
-# Slurm 提交（单节点多卡）：
-sbatch slurm/train_ddp_single_node.slurm
-
-# Slurm 提交（多节点多卡，跨节点走 RDMA/IB，见脚本内 NCCL_* 变量）：
-sbatch slurm/train_ddp_multi_node.slurm
+bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
 ```
+
+等价的 `torchrun` 写法见第 5.1.1 节。`slurm/*.slurm` 已归档，本仓库不用 `sbatch` 提交训练。
 
 **注意事项**：
 
-- `--gres`/`--nodes`/`NPROC_PER_NODE` 需按实际分配的加速卡数调整；提交前用 `sinfo`、`sacctmgr show assoc user=$USER` 确认本账号可用的 AI/DCU 分区名（示例脚本中的 `qdagnormal` 为占位）。
-- 建议先用 `slurm/train_ddp_single_node.slurm` 跑通单节点多卡，确认 DDP/SyncBN/checkpoint 逻辑与单卡 loss 曲线一致后，再扩展到多节点（多节点新增网络变量排障成本更高）。
+- `NPROC_PER_NODE` 必须等于控制台「每实例加速卡数量」；8 卡保持 `--batch_size 1`。
+- 架构冒烟用 `scripts/launch_platform_smoke_single.sh` / `smoke_ddp.sh`；全量 1 epoch 探测用 `launch_platform_train_copy.sh`。
 - `--eval_only --resume <ckpt>` 同样支持分布式启动（用多卡加速大验证集的补算指标过程）。
 - 梯度累积 `--accum_steps` 与分布式 `world_size` 会同时放大有效 batch；调 `--lr`/`--warmup_steps` 时请按新的 global batch 重新核对。
 
@@ -515,46 +505,48 @@ CUDA_VISIBLE_DEVICES=0 conda run -n pytorch_downscale python /public/home/acd7ko
 
 ## 9. 正式训练配置（已确定）
 
-正式训练确定：**不开 CBAM（`--no_cbam`）+ HR 辅助仅在 Stage1 注入（`--hr_aux_mode stage1`）+
-分布式训练（DDP）**，并叠加方案 A（调参）与方案 B（`--norm_type group` / `--ema_decay` /
-`--warmup_ratio`，见第 5.1a 节）。**损失函数已确定为第 4 节的 v2 方案**（面积加权
-`TailWeightedMAE` 参考目标 + `PatchExtremeLoss` + `WindPowerSensitivityProxy` +
-`PhysicalConsistencyLoss`，具体权衡见 `loss_plan/final_decision.md`）；下方命令未显式传入
-损失相关 CLI 参数，均按 `train.py` v2 默认值生效，等价于第 4.4 节的"v2 默认"示例命令。
-正式长跑前务必先完成 `loss_plan/final_decision.md` 第 4 节的一次性数量级校验。
+正式长跑入口：**SCNet「模型训练」控制台** →
+`bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh`。
+本仓库不用 `sbatch` / `slurm/*.slurm`。
+
+架构：**不开 CBAM（`--no_cbam`）+ HR 辅助仅在 Stage1 注入（`--hr_aux_mode stage1`）+
+`--norm_type group` + `--ema_decay 0.999` + `--warmup_ratio 0.03`**（见第 5.1a 节）。
+**损失函数为第 4 节 v2 默认**（面积加权 `TailWeightedMAE` + `PatchExtremeLoss` +
+`WindPowerSensitivityProxy` + `PhysicalConsistencyLoss`）；脚本不传损失参数，与
+`train.py` v2 默认值一致。8 卡保持 `--batch_size 1`，不要提到 2。
+数据：`paths.HDF5_ROOT`（`/public/home/acd7koea4a/hdf5_norm_fp16`）+ `--manifests cra1p5_full`。
 
 ```bash
-cd /public/home/acd7koea4a/work
-# 先用 sinfo / sacctmgr show assoc user=$USER 确认并改好 slurm 脚本里的 --partition
-sbatch slurm/train_ddp_single_node.slurm     # 首选：单节点多卡 DDP
+# 控制台「启动命令」填这一行（NPROC_PER_NODE 默认 8，须等于「每实例加速卡数量」）
+bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
 ```
 
-等价命令：
+脚本内部等价命令：
 
 ```bash
-torchrun --nnodes=1 --nproc_per_node=8 train.py \
+torchrun --nnodes="${WORLD_SIZE:-1}" --nproc_per_node="${NPROC_PER_NODE:-8}" \
+    --node_rank="${RANK:-0}" --master_addr="${MASTER_ADDR:-127.0.0.1}" \
+    --master_port="${MASTER_PORT:-23456}" \
+    train.py \
     --hdf5_root /public/home/acd7koea4a/hdf5_norm_fp16 \
-    --epochs 100 --batch_size 2 --accum_steps 2 --val_fraction 0.2 --val_interval 2 \
+    --seasons MAM JJA SON DJF --manifests cra1p5_full \
+    --epochs 100 --batch_size 1 --accum_steps 2 --val_fraction 0.2 --val_interval 2 \
     --num_workers 4 \
     --no_cbam --hr_aux_mode stage1 \
     --norm_type group --ema_decay 0.999 \
     --warmup_ratio 0.03 \
     --early_stop_patience 20 \
-    --run_dir runs/exp_prod_ddp_1node
+    --run_dir runs/exp_prod_ddp_platform
 ```
 
-提交正式训练前，建议先跑通两个冒烟（单个 shard，验证管线，不是精度）：
+提交 100 epoch 前，建议先跑通：
 
-1. `sbatch slurm/train_smoke_test.slurm`（单卡）——验证 `--no_cbam --hr_aux_mode stage1
-   --norm_type group --ema_decay --warmup_ratio` 在真实 GPU 上跑通；
-2. `sbatch slurm/train_smoke_test_ddp.slurm`（2 卡）——验证分布式路径本身没问题，再放心扩到 8 卡。
+1. `scripts/launch_platform_smoke_single.sh`（单卡）/ `smoke_ddp.sh`（多卡）——16 样本管线冒烟
+2. `scripts/launch_platform_train_copy.sh`（全量 1 epoch）——确认读盘 / 显存 / `validate()` / 落盘
+3. 可选：`scripts/launch_platform_short_8gpu.sh`（8 卡、2 epoch）
 
-多节点扩展用 `slurm/train_ddp_multi_node.slurm`；无多卡资源时的单卡回退用 `slurm/train_gpu.slurm`
-（同一套参数，`--batch_size 1 --accum_steps 4`）。三者均已同步这套正式配置。
-
-推理时取这次训练的权重：`infer.py --auto_model_cfg` 会自动从 checkpoint 识别
-`use_cbam/hr_aux_mode/norm_type`；若训练开了 EMA，建议加 `--use_ema` 使用 `model_ema`
-（部署权重）而非训练用的在线权重 `model`。
+裸跑 `python train.py` 会落到另一套 CLI 默认架构（CBAM 开、`hr_aux=all`、BatchNorm、无 EMA），不要当正式训练。
+测试集尚未就绪，推理脚本本轮不改；不要把 `infer.py --hdf5_root` 指到 `hdf5_norm_fp16`。
 
 更完整的分析、调参依据与逐步操作清单见 `TRAINING_ANALYSIS.md`。
 

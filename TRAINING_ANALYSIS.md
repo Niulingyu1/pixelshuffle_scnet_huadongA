@@ -1,8 +1,15 @@
 # 降尺度训练：分析梳理与下一步行动
 
-日期：2026-09-12  
+日期：2026-09-12（数据管线于 2026-09-18 增加预标准化 fp16 副本，见第 1.2 节）  
 范围：当前仓库脚本与任务逻辑、迁移遗留问题、损失函数/验证口径、训练优化路径  
-数据现状：正式全量 HDF5 仍在上传；现有可用样本为 `/public/share/acd7koea4a/hdf5/MAM/shard_cra1p5_full_0038.h5`（16 个样本，float32）
+数据现状（2026-09-18 已切训练默认路径）：
+
+- 训练数据：`/public/home/acd7koea4a/hdf5_norm_fp16`（`paths.HDF5_ROOT`），153 shard / 14965 样本 / 533GB，磁盘 **fp16 预标准化**，`metadata.normalized=True`
+- 原始备份：`/public/share/acd7koea4a/hdf5`（`HDF5_ROOT_RAW`，fp32、未 z-score，保留）
+- Dataset 出口：`x_lr/y_hr` **bfloat16**，`hr_aux` **float32**；与 `train.py` `autocast(bf16)` 对齐
+- 校验：完整性 `missing=0 incomplete=0 tmp=0`；MAM 8 样本 `max|dx|/|dy|=0.03125`；BW1000 DTK 上 `forward+backward OK`（`pred`/`loss` 均为 bf16）
+- 推理：仍读未标准化 `hdf5_cesm*` + 在线 z-score；指向预标准化目录会被 `infer.py` 拒绝
+- Notebook 未挂 share 时：`static`/`stats` 回退 `/public/home/acd7koea4a/local_data`；BW1000 必须用镜像 DTK Python，不要 `source env/activate.sh`
 
 ---
 
@@ -26,9 +33,10 @@
 ```
 HDF5 shard_*.h5
   → 读 data/x, data/y, data/dates
-  → z-score（同一组 mean/std）
-  → x_lr = 8 个归一化气象变量
-  → hr_aux = 6 个 HR 静态 + 1 个在线计算的 cos(SZA)_hr
+  → 若 metadata.normalized：跳过 z-score（磁盘已是 z-score fp16）
+  → 否则：z-score（同一组 mean/std）
+  → x_lr/y_hr 转为 bfloat16
+  → hr_aux = 6 个 HR 静态 + 1 个在线计算的 cos(SZA)_hr（fp32）
   → 模型输出 8 通道 HR 预测（无末端激活，回归）
 ```
 
@@ -36,12 +44,14 @@ HDF5 shard_*.h5
 
 | 项 | 值 |
 | --- | --- |
-| 文件 | `hdf5/MAM/shard_cra1p5_full_0038.h5` |
-| `data/x` | `(16, 8, 180, 360)` float32 |
-| `data/y` | `(16, 8, 1801, 3600)` float32 |
+| 文件 | `hdf5/MAM/shard_cra1p5_full_0038.h5`（及全量 153 个 shard） |
+| `data/x` | `(N, 8, 180, 360)` 原始为 **float32、未 z-score** |
+| `data/y` | `(N, 8, 1801, 3600)` 原始为 **float32、未 z-score** |
 | 压缩 | gzip-4，按样本分块 |
-| 质量 | 无 NaN / Inf，数值范围正常 |
-| 注释过期点 | 代码注释仍写 float16，实际是 float32（正确性不受影响，磁盘/带宽约为原先预期的 2 倍） |
+| metadata | 有 `metadata` 组；原始数据无 `normalized` 属性（视为未标准化） |
+| 预标准化副本 | `/public/home/acd7koea4a/hdf5_norm_fp16`（`HDF5_ROOT`）：153 shard / 14965 样本 / 533GB。离线 z-score 后存 **float16**，`metadata.normalized=True`；`Dataset` 读出转为 **bfloat16**。脚本：`normalize_hdf5_fp16.py` |
+| `hr_aux` | 仍为在线计算的 fp32，不写入 HDF5 |
+| 校验（2026-09-18） | 全量 `--check_complete`：`tmp_leftover=0 missing=0 incomplete=0`。旧管线在线 z-score→bf16 vs 新管线跳过 z-score→bf16（MAM 8 样本）：`max\|dx\|/\|dy\|=0.03125`（bf16 ULP），`hr_aux` 差分为 0。BW1000（DTK torch 2.7.1, hip 6.3，`device=cuda:0 name=BW`）：`x/y=bf16`、`hr_aux=fp32`，`autocast(bf16)` 前向+反向 `pred=bf16`、`loss=bf16`，`forward+backward OK`。 |
 
 ### 1.3 模型
 
@@ -466,7 +476,7 @@ python infer.py --ckpt runs/exp_prod_ddp_1node/checkpoints/best.pt \
     --auto_model_cfg --use_ema \
     --hdf5_root /public/share/acd7koea4a/hdf5 --seasons DJF \
     --out_dir infer_out_prod --output_mode per_sample --output_format nc \
-    --output_space physical --amp_bf16
+    --lon_convention neg180_180 --output_space physical --amp_bf16
 ```
 
 ---
@@ -487,5 +497,5 @@ python infer.py --ckpt runs/exp_prod_ddp_1node/checkpoints/best.pt \
 | 正式训练 slurm（多节点扩展） | `/public/home/acd7koea4a/work/slurm/train_ddp_multi_node.slurm` |
 | 正式训练 slurm（单卡回退） | `/public/home/acd7koea4a/work/slurm/train_gpu.slurm` |
 | 冒烟数据 | `/public/home/acd7koea4a/work/smoke_test_data` |
-| 正式 HDF5 根目录 | `/public/share/acd7koea4a/hdf5` |
+| 正式 HDF5 根目录 | `/public/home/acd7koea4a/hdf5_norm_fp16`（fp32 备份：`/public/share/acd7koea4a/hdf5`） |
 | 归一化统计 | `/public/share/acd7koea4a/states/global_stats_state.json` |

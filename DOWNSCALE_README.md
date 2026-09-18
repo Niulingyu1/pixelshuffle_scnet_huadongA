@@ -8,17 +8,33 @@
 | 项目   | 说明                                                                                                          |
 | ---- | ----------------------------------------------------------------------------------------------------------- |
 | 目标   | 全球约 1°（180×360）→ 约 0.1°（1801×3600），8 个变量：`TAS`, `PRE`, `wind10`, `Q`, `2M_RH`, `2M_TMAX`, `2M_TMIN`, `FSDS` |
-| HDF5 | `data/x` `(N,8,180,360)`，`data/y` `(N,8,1801,3600)`，`data/dates`；分季节目录                                      |
-| 预处理  | 写入 HDF5 前：`PRE` 为 `log1p`；`Q` 已 ×1000（g/kg）                                                                 |
-| 归一化  | `global_stats_state.json` 中 `var_all` 的 mean / `sqrt(M2/n)` 对 **8 个气象变量** 做 z-score；**静态与 cos(SZA) 不归一化**   |
+| HDF5 | 全量训练默认指向 `HDF5_ROOT_NORM`=`/public/home/acd7koea4a/hdf5_norm_fp16`：磁盘 `data/x`/`data/y` 为离线 z-score 后的 **float16**，`metadata.normalized=True`。原始备份仍在 `/public/share/acd7koea4a/hdf5`（`HDF5_ROOT_RAW`，fp32、未 z-score）。`hdf5_mini` / CESM 推理 HDF5 仍为未标准化物理量。`Dataset` 按 metadata 自动识别，出口 `x_lr`/`y_hr` 一律 **bfloat16**；`hr_aux` 保持 fp32。 |
+| 预处理  | 写入原始 HDF5 前：`PRE` 为 `log1p`；`Q` 已 ×1000（g/kg）                                                                 |
+| 归一化  | `global_stats_state.json` 中 `var_all` 的 mean / `sqrt(M2/n)`。预标准化数据离线完成 z-score；未标准化数据仍在 `dataset.py` 在线做。**静态与 cos(SZA) 不归一化** |
 
+### 1.1 离线 z-score + fp16 副本
+
+全量训练集已离线写成 `/public/home/acd7koea4a/hdf5_norm_fp16`（目录结构与文件名与原始 `hdf5/` 相同）：磁盘上 `data/x`/`data/y` 已是 z-score 后的 **float16**，`metadata.normalized=True`。`dataset.py` 读出后统一转为 **bfloat16** 再返回，与 `train.py` 的 `autocast(dtype=bfloat16)` 对齐；`hr_aux` 仍为在线 fp32。`hdf5_mini` / CESM 推理 HDF5 保持未标准化物理量。
+
+```bash
+python normalize_hdf5_fp16.py --dry_run
+python normalize_hdf5_fp16.py --check_complete
+python scripts/check_hdf5_norm_fp16.py \
+    --src /public/share/acd7koea4a/hdf5 \
+    --dst /public/home/acd7koea4a/hdf5_norm_fp16 \
+    --seasons MAM --manifests cra1p5_full --n_check 8
+```
+
+`paths.py` 里 `HDF5_ROOT` 已指向 `HDF5_ROOT_NORM`。`infer.py --input_source hdf5` 若指向预标准化目录会直接报错，避免静默二次标准化。
+
+2026-09-18 已在 BW1000（DTK torch 2.7.1）上跑通 `scripts/smoke_norm_fp16_step.py`：`pred`/`loss` 保持 bfloat16，前向+反向无 dtype 报错。正式训练用 `scripts/launch_platform_train.sh`（镜像自带 python，不要 conda）。
 
 ---
 
 ## 2. 输入 / 输出张量
 
-- `**x_lr`**：`(B, 8, 180, 360)` — 仅 8 个气象变量（已 z-score）；LR 静态与 `cos(SZA)_lr` 不再拼入（地形/位置/日射等由 `hr_aux` 在 HR 网格上注入）
-- `**hr_aux**`：`(B, 7, 1801, 3600)` — 6 HR 静态 + 1 `cos(SZA)_hr`；在 `forward` 内按阶段双线性插值到各层输出尺寸
+- `**x_lr`**：`(B, 8, 180, 360)` **bfloat16** — 仅 8 个气象变量（已 z-score）；LR 静态与 `cos(SZA)_lr` 不再拼入（地形/位置/日射等由 `hr_aux` 在 HR 网格上注入）
+- `**hr_aux**`：`(B, 7, 1801, 3600)` **float32** — 6 HR 静态 + 1 `cos(SZA)_hr`；在 `forward` 内按阶段双线性插值到各层输出尺寸
 - **模型输出**：`(B, 8, 1801, 3600)`，与 `y_hr` 同形状；**无末端激活**（回归）
 
 ### 通道明细
@@ -356,8 +372,10 @@ torchrun \
   2. **依赖**：确认镜像里已有 `h5py`、`netCDF4`、`tensorboard`（`requirements.txt` /
      `environment.yml`），没有则在自定义镜像里预装好（避免每次启动都现装浪费时间）。
   3. **路径挂载**：数据根目录为 `/public/share/acd7koea4a`（见 `paths.py` 中 `DATA_ROOT`）；
-     代码与训练产物在 `/public/home/acd7koea4a/work`。若容器内挂载点不同，用控制台「自定义挂载」
-     挂上，或改用 `--hdf5_root`/`--static_dir`/`--stats_file` 显式指定容器内实际路径。
+     代码与训练产物在 `/public/home/acd7koea4a/work`。若容器未挂 share，`paths.py` 会回退到
+     `/public/home/acd7koea4a/local_data`（`static/` + `states/global_stats_state.json` 真实副本）。
+     家目录下的 `~/static`、`~/states` 是指向 share 的符号链接，share 未挂时不可用。
+     也可 `--static_dir`/`--stats_file` 显式指定。
   4. 首次运行建议先用「SSH」进容器手动跑通一小段（如 `hdf5_mini` + 1 epoch）确认路径/依赖
      无误，再提交正式多卡任务。
 
@@ -481,14 +499,15 @@ CUDA_VISIBLE_DEVICES=0 conda run -n pytorch_downscale python /public/home/acd7ko
   --out_dir /public/home/acd7koea4a/work/infer_out_cesm_stable \
   --output_mode per_sample \
   --output_format nc \
+  --lon_convention neg180_180 \
   --output_space physical \
-  --amp_bf16 \
-  --auto_model_cfg
+  --amp_bf16
 ```
 
 说明：
 
 - `infer.py` 会校验 HDF5 输入契约（`data/x`, `data/dates`, `x` 形状）；
+- 写 NetCDF 必须显式传 `--lon_convention`（`neg180_180` 或 `pos0_360`），没有隐式默认，避免坐标系被静默翻转；
 - 若 HDF5 含 `metadata/lr_grid_lats/lr_grid_lons`，会与 `static/lat_lr.npy/lon_lr.npy` 强一致校验，避免静默坐标偏差；
 - `input_source=cesm_nc` 仅保留为实验诊断入口，默认不启用。
 
@@ -514,7 +533,7 @@ sbatch slurm/train_ddp_single_node.slurm     # 首选：单节点多卡 DDP
 
 ```bash
 torchrun --nnodes=1 --nproc_per_node=8 train.py \
-    --hdf5_root /public/share/acd7koea4a/hdf5 \
+    --hdf5_root /public/home/acd7koea4a/hdf5_norm_fp16 \
     --epochs 100 --batch_size 2 --accum_steps 2 --val_fraction 0.2 --val_interval 2 \
     --num_workers 4 \
     --no_cbam --hr_aux_mode stage1 \

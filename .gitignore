@@ -19,6 +19,7 @@ venv/
 # Training outputs & logs
 runs/
 logs/
+norm_fp16_logs/
 *.log
 
 # Model checkpoints

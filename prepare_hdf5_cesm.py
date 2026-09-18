@@ -50,7 +50,7 @@ CUDA_VISIBLE_DEVICES=7 nohup python prepare_hdf5_cesm.py \
 后续用上述 HDF5 目录作推理输入：
   conda run -n pytorch_downscale python infer.py \
     --input_source hdf5 --hdf5_root /public/share/acd7koea4a/hdf5_cesm --seasons DJF MAM JJA SON \
-    --ckpt ... --out_dir ... --output_mode per_sample --output_format nc --auto_model_cfg
+    --ckpt ... --out_dir ... --output_mode per_sample --output_format nc --lon_convention neg180_180 --auto_model_cfg
 """
 
 from __future__ import annotations

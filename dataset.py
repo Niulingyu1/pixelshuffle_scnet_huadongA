@@ -2,19 +2,28 @@
 # PixelShuffle 下采样模型的数据集定义。
 #
 # 每个样本返回三元组：
-#   x_lr   : (8, 180, 360)   float32
+#   x_lr   : (8, 180, 360)   bfloat16
 #              8 个归一化 LR 气候变量（LR 静态特征与 cos(SZA)_lr 已移入 hr_aux 路径，
 #              不再拼入 LR 输入，避免重复引入干扰）
 #   hr_aux : ( 7, 1801, 3600) float32
-#              6 个 HR 静态特征 + 1 个 cos(SZA)_hr
-#   y_hr   : ( 8, 1801, 3600) float32  （归一化后的高分辨率8变量）
+#              6 个 HR 静态特征 + 1 个 cos(SZA)_hr（本次保持 fp32，不随 HDF5 转换）
+#   y_hr   : ( 8, 1801, 3600) bfloat16  （归一化后的高分辨率 8 变量）
+#
+# 两种 HDF5 数据源（按 shard metadata.normalized 自动识别，同一 hdf5_root 内不得混用）：
+#   - 预标准化 fp16（全量训练 hdf5_norm_fp16）：磁盘已是 z-score 后的 float16，
+#     读出后转为 bfloat16，不再做 (x-mean)/std
+#   - 未标准化 fp32（hdf5_mini / 原始 hdf5 备份 / CESM 训练格式）：读出后在 float32
+#     上做 z-score，再转为 bfloat16
+#
+# Dataset.__getitem__ 出口的 x_lr/y_hr 一律为 bfloat16，与 train.py 的
+# autocast(dtype=bfloat16) 对齐。hr_aux 保持 float32。
 #
 # cos(SZA)（太阳天顶角余弦）在线计算，采用模块级 LRU 缓存。
 # LR 特征缓存最大为 400 条（约 100 MB），HR 特征缓存最大为 50 条（约 1.3 GB）。
 # 注：_load_lr_static / _cos_sza_lr 函数仍保留，供 infer.py 单独调用。
 """
 
-# 数据流：HDF5 读 LR/HR 变量与日期 → z-score → 拼 LR 静态与 cos(SZA) → 返回 (x_lr, hr_aux, y_hr)。
+# 数据流：HDF5 读 LR/HR 变量与日期 → [未标准化则 z-score] → 转 bf16 → 拼 hr_aux → 返回。
 
 from __future__ import annotations
 
@@ -48,7 +57,15 @@ _NORM_STD:  np.ndarray | None = None   # (8,) float32
 def _load_norm_stats() -> tuple[np.ndarray, np.ndarray]:
     global _NORM_MEAN, _NORM_STD
     if _NORM_MEAN is None:
-        with open(STATS_FILE) as f:
+        stats_path = Path(STATS_FILE)
+        if not stats_path.is_file():
+            raise FileNotFoundError(
+                f"找不到归一化统计文件: {stats_path}。"
+                "Notebook 需挂载 /public/share/acd7koea4a，"
+                "或使用家目录真实副本 /public/home/acd7koea4a/local_data "
+                "（paths.py 会在 share 不可用时自动回退）。"
+            )
+        with open(stats_path) as f:
             d = json.load(f)
         means, stds = [], []
         for v in VARIABLES:
@@ -221,15 +238,30 @@ def _shard_batch_tag(h5path: Path) -> str | None:
     return m.group("tag") if m else None
 
 
+def is_pre_normalized_shard(h5path: Path | str) -> bool:
+    """True iff the shard metadata marks pre-normalized z-score fp16 storage.
+
+    Missing metadata group or missing ``normalized`` attr → False (legacy fp32).
+    """
+    with h5py.File(h5path, "r") as f:
+        if "metadata" not in f:
+            return False
+        return bool(f["metadata"].attrs.get("normalized", False))
+
+
 def _build_index(
     hdf5_root: Path,
     seasons: Sequence[str],
     manifests: Sequence[str] | None = None,
-) -> list[tuple[str, int]]:
+) -> tuple[list[tuple[str, int]], bool]:
     """
-    Returns a flat list of (hdf5_file_path, sample_idx_within_file).
+    Returns (index, pre_normalized).
+
+    index: flat list of (hdf5_file_path, sample_idx_within_file).
+    pre_normalized: True if every included shard is marked normalized.
 
     将各季节目录下 shard_*.h5 展平为全局样本索引，供 Dataset.__getitem__ 随机访问。
+    同一 hdf5_root 下不得混用预标准化 / 未标准化 shard。
 
     Args:
         hdf5_root:  directory containing season sub-folders.
@@ -243,6 +275,7 @@ def _build_index(
     """
     allowed = set(manifests) if manifests else None
     index: list[tuple[str, int]] = []
+    flags: dict[str, bool] = {}
     for season in seasons:
         season_dir = hdf5_root / season
         if not season_dir.exists():
@@ -259,8 +292,22 @@ def _build_index(
                     continue
             with h5py.File(h5path, "r") as f:
                 n = f["data/x"].shape[0]
+                normalized = False
+                if "metadata" in f:
+                    normalized = bool(f["metadata"].attrs.get("normalized", False))
+            flags[str(h5path)] = bool(normalized)
             index.extend((str(h5path), i) for i in range(n))
-    return index
+    uniq = set(flags.values())
+    if len(uniq) > 1:
+        true_files = [p for p, v in flags.items() if v]
+        false_files = [p for p, v in flags.items() if not v]
+        raise ValueError(
+            f"{hdf5_root}: 同一 hdf5_root 混有预标准化与未标准化 shard，"
+            f"normalized=True 例: {true_files[:3]} ; "
+            f"normalized=False 例: {false_files[:3]}"
+        )
+    pre_normalized = bool(next(iter(uniq))) if uniq else False
+    return index, pre_normalized
 
 
 # ---------------------------------------------------------------------------
@@ -272,9 +319,9 @@ class DownscaleDataset(Dataset):
     # 用于气候变量降尺度的 PyTorch Dataset。
 
     # 每个样本包含：
-    #     x_lr   : ( 8, 180, 360)   float32  —— 标准化后的低分辨率 8 个气候变量
-    #     hr_aux : ( 7, 1801, 3600) float32  —— 高分辨率静态因子 + cos_sza_hr
-    #     y_hr   : ( 8, 1801, 3600) float32  —— 标准化后的高分辨率目标变量
+    #     x_lr   : ( 8, 180, 360)   bfloat16  —— 标准化后的低分辨率 8 个气候变量
+    #     hr_aux : ( 7, 1801, 3600) float32   —— 高分辨率静态因子 + cos_sza_hr
+    #     y_hr   : ( 8, 1801, 3600) bfloat16  —— 标准化后的高分辨率目标变量
 
     # 参数说明:
     #     hdf5_root:   包含各个季节子文件夹的根目录
@@ -299,15 +346,20 @@ class DownscaleDataset(Dataset):
         STATS_FILE = Path(stats_file)
 
         self.hdf5_root = Path(hdf5_root)
-        self.index     = _build_index(self.hdf5_root, seasons, manifests)
+        self.index, self.pre_normalized = _build_index(self.hdf5_root, seasons, manifests)
 
-        # 全局 mean/std，与 HDF5 中 8 变量顺序一致
+        # 全局 mean/std，与 HDF5 中 8 变量顺序一致（反标准化 / 未标准化路径仍需要）
         self.norm_mean, self.norm_std = _load_norm_stats()   # (8,) each
 
         # fork 子进程后写时复制，多 worker 共享只读大数组内存
         # lr_static 不再拼入 x_lr，但保留加载供子类或外部调用
         self.lr_static = _load_lr_static()   # (6, 180, 360)
         self.hr_static = _load_hr_static()   # (6, 1801, 3600)
+
+        print(
+            f"[dataset] hdf5_root={self.hdf5_root}  pre_normalized={self.pre_normalized}  "
+            f"n_samples={len(self.index)}  static_dir={STATIC_DIR}  stats_file={STATS_FILE}"
+        )
 
     def __len__(self) -> int:
         return len(self.index)
@@ -316,21 +368,26 @@ class DownscaleDataset(Dataset):
         h5path, sample_i = self.index[idx]
 
         with h5py.File(h5path, "r") as f:
-            x_raw = f["data/x"][sample_i]       # (8, 180, 360)  float16
-            y_raw = f["data/y"][sample_i]       # (8, 1801, 3600) float16
+            x_raw = f["data/x"][sample_i]       # (8, 180, 360)
+            y_raw = f["data/y"][sample_i]       # (8, 1801, 3600)
             date  = f["data/dates"][sample_i]   # bytes, e.g. b'19790101'
 
         date_str = date.decode() if isinstance(date, (bytes, np.bytes_)) else str(date)
 
-        # 与训练目标一致：LR/HR 动态变量均用同一组全局 mean/std 做 z-score
-        # ---- normalise x and y (float32, z-score) ----
-        x = x_raw.astype(np.float32)   # (8, 180, 360)
-        y = y_raw.astype(np.float32)   # (8, 1801, 3600)
-
-        mean = self.norm_mean[:, None, None]   # (8, 1, 1)
-        std  = self.norm_std[:, None, None]
-        x = (x - mean) / std
-        y = (y - mean) / std
+        if self.pre_normalized:
+            # 磁盘已是 z-score fp16；进程内统一转 bf16，不再做 (x-mean)/std
+            x = torch.from_numpy(np.array(x_raw, copy=True)).to(torch.bfloat16)
+            y = torch.from_numpy(np.array(y_raw, copy=True)).to(torch.bfloat16)
+        else:
+            # 与训练目标一致：LR/HR 动态变量均用同一组全局 mean/std 做 z-score
+            x = x_raw.astype(np.float32)   # (8, 180, 360)
+            y = y_raw.astype(np.float32)   # (8, 1801, 3600)
+            mean = self.norm_mean[:, None, None]   # (8, 1, 1)
+            std  = self.norm_std[:, None, None]
+            x = (x - mean) / std
+            y = (y - mean) / std
+            x = torch.from_numpy(np.ascontiguousarray(x)).to(torch.bfloat16)
+            y = torch.from_numpy(np.ascontiguousarray(y)).to(torch.bfloat16)
 
         # 日尺度平均 cos(SZA)，仅随纬度与日期变化；缓存返回只读数组
         sza_hr = _cos_sza_hr(date_str)   # (1, 1801, 3600)
@@ -338,14 +395,14 @@ class DownscaleDataset(Dataset):
         # 网络 LR 输入：仅 8 个归一化气候变量（去掉 LR 静态与 cos_sza_lr，避免重复干扰）
         x_lr = x   # (8, 180, 360)
 
-        # HR 辅助（不进 y）：6 HR 静态 + 1 cos_sza_hr = 7 通道
+        # HR 辅助（不进 y）：6 HR 静态 + 1 cos_sza_hr = 7 通道；保持 fp32
         hr_aux = np.concatenate([self.hr_static, sza_hr], axis=0)    # (7, 1801, 3600)
 
         # copy：避免与 h5 缓冲区共享可写内存，防止 DataLoader 多线程竞态
         return (
-            torch.from_numpy(x_lr.copy()),
+            x_lr,
             torch.from_numpy(hr_aux.copy()),
-            torch.from_numpy(y.copy()),
+            y,
         )
 
     # ------------------------------------------------------------------

@@ -57,8 +57,10 @@ FSDS >= 0
   - NetCDF 输出的原生列顺序已核实与本仓库静态网格（static/lon_lr.npy、
     static/lon_hr.npy，均为 -179.5..179.5 / -180..179.9）一致，即原生顺序
     对应 lon=-180..180 单调索引。
-  - --lon_convention 默认 neg180_180：原样写出（不 roll），标注 lon -180..180；
-    如需 0..360，可传 --lon_convention pos0_360（内部按 W//2 滚动重排）。
+  - 写 NetCDF 时必须显式传 --lon_convention（无默认值）。旧默认曾是 pos0_360，
+    后改为与原生列顺序一致的 neg180_180；隐式默认会让未改脚本静默换坐标系。
+      --lon_convention neg180_180：原样写出（不 roll），标注 lon -180..180；
+      --lon_convention pos0_360：内部按 W//2 滚动重排，标注 lon 0..360。
 
 
 
@@ -94,6 +96,7 @@ FSDS >= 0
   --out_dir /public/home/acd7koea4a/work/infer_out_test_nc_no_cbam_hr_1 \
   --output_mode per_sample \
   --output_format nc \
+  --lon_convention neg180_180 \
   --output_space physical \
   --amp_bf16 \
   --auto_model_cfg
@@ -104,6 +107,7 @@ CUDA_VISIBLE_DEVICES=0 nohup conda run -n pytorch_downscale python /public/home/
   --out_dir /public/home/acd7koea4a/work/infer_out_test_nc_no_cbam_hr_1 \
   --output_mode per_sample \
   --output_format nc \
+  --lon_convention neg180_180 \
   --output_space physical \
   --amp_bf16 \
   --auto_model_cfg > infer_test_nc_no_cbam_hr_1.log 2>&1 & echo "作业PID: $!" >> infer_test_nc_no_cbam_hr_1.log
@@ -119,6 +123,7 @@ CUDA_VISIBLE_DEVICES=0 nohup conda run -n pytorch_downscale python /public/home/
   --out_dir /public/home/acd7koea4a/work/infer_out_test_no_all \
   --output_mode per_sample \
   --output_format nc \
+  --lon_convention neg180_180 \
   --output_space physical \
   --amp_bf16 \
   --auto_model_cfg > infer_test_no_all.log 2>&1 & echo "作业PID: $!" >> infer_test_no_all.log
@@ -132,6 +137,7 @@ CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/
   --no_physical_constraints \
   --output_mode per_sample \
   --output_format nc \
+  --lon_convention neg180_180 \
   --output_space physical \
   --amp_bf16 \
   --auto_model_cfg > infer_test_no_all_no_physical_constraints.log 2>&1 & echo "作业PID: $!" >> infer_test_no_all_no_physical_constraints.log
@@ -152,6 +158,7 @@ CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/
     --out_dir /public/home/acd7koea4a/work/infer_out_cesm_com \
     --output_mode per_sample \
     --output_format nc \
+    --lon_convention neg180_180 \
     --output_space physical \
     --amp_bf16 \
     --auto_model_cfg
@@ -165,6 +172,7 @@ CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/
   --out_dir /public/home/acd7koea4a/work/infer_out_cesm \
   --output_mode per_sample \
   --output_format nc \
+  --lon_convention neg180_180 \
   --output_space physical \
   --amp_bf16 \
   --auto_model_cfg > infer_cesm_all.log 2>&1 & echo "PID: $!" >> infer_cesm_all.log
@@ -177,6 +185,7 @@ CUDA_VISIBLE_DEVICES=7 nohup conda run -n pytorch_downscale python /public/home/
   --out_dir /public/home/acd7koea4a/work/infer_out_cesm_no_mbc \
   --output_mode per_sample \
   --output_format nc \
+  --lon_convention neg180_180 \
   --output_space physical \
   --amp_bf16 \
   --auto_model_cfg > infer_cesm_all.log 2>&1 & echo "PID: $!" >> infer_cesm_all.log
@@ -329,12 +338,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output_format", default="h5", choices=["h5", "nc"], help="output file format for predictions")
     p.add_argument(
         "--lon_convention",
-        default="neg180_180",
+        default=None,
         choices=["neg180_180", "pos0_360"],
         help=(
-            "Longitude axis convention for NetCDF outputs. "
-            "neg180_180 (default) keeps the native column ordering (verified "
-            "against real training HDF5 data) and writes lon -180..180; "
+            "Longitude axis convention for NetCDF outputs. Required when "
+            "--output_format nc (no implicit default). Native columns match "
+            "lon=-180..180 (verified against training HDF5). "
+            "neg180_180 keeps native order and writes lon -180..180; "
             "pos0_360 rolls by W//2 and writes lon 0..360."
         ),
     )
@@ -1408,8 +1418,43 @@ def _apply_lon_convention_to_pred(
         return pred2, _lon_axis_pos0_360(w)
     raise ValueError(lon_convention)
 
+
+def _require_lon_convention_for_nc(
+    output_format: str, lon_convention: str | None
+) -> LonConvention | None:
+    """Refuse a silent lon-axis default for NetCDF writes.
+
+    Native model columns match -180..180, but the CLI default used to be
+    pos0_360 and was later switched to neg180_180. Callers must set the
+    flag explicitly so existing pipelines cannot silently flip coordinates.
+    """
+    if output_format != "nc":
+        if lon_convention is None:
+            return None
+        if lon_convention in ("neg180_180", "pos0_360"):
+            return lon_convention
+        raise ValueError(lon_convention)
+    if lon_convention in ("neg180_180", "pos0_360"):
+        return lon_convention
+    raise SystemExit(
+        "--lon_convention is required when --output_format nc.\n"
+        "Choose:\n"
+        "  neg180_180  keep native columns, write lon -180..180 "
+        "(matches training HDF5 / static lon_hr.npy)\n"
+        "  pos0_360    roll by W//2, write lon 0..360\n"
+        "There is no implicit default: a previous default of pos0_360 was "
+        "replaced after verifying native order is -180..180, and a silent "
+        "new default would reverse coordinates for existing scripts."
+    )
+
+
 def main() -> None:
     args = _parse_args()
+    args.lon_convention = _require_lon_convention_for_nc(
+        args.output_format, args.lon_convention
+    )
+    if args.output_format == "nc":
+        print(f"[lon_convention] {args.lon_convention}")
 
     # route dataset module globals to user-specified paths
     ds.STATIC_DIR = Path(args.static_dir)
@@ -1703,6 +1748,13 @@ def main() -> None:
         shards = _list_shards(hdf5_root, args.seasons)
         if not shards:
             raise SystemExit(f"No shards found under {hdf5_root} for seasons={args.seasons}")
+        for h5path in shards:
+            if ds.is_pre_normalized_shard(h5path):
+                raise SystemExit(
+                    f"{h5path}: 该目录是预标准化数据（metadata.normalized=True），"
+                    "infer.py 当前不支持直接消费（会静默二次标准化）。"
+                    "请改用未标准化的 hdf5_cesm* / 原始 hdf5 目录。"
+                )
 
         expected_lat_lr = np.load(ds.STATIC_DIR / "lat_lr.npy").astype(np.float32)
         expected_lon_lr = np.load(ds.STATIC_DIR / "lon_lr.npy").astype(np.float32)

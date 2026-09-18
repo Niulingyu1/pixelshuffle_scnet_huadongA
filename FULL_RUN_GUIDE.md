@@ -193,7 +193,7 @@ torchrun \
     --master_addr="${MASTER_ADDR:-127.0.0.1}" \
     --master_port="${MASTER_PORT:-23456}" \
     train.py \
-    --hdf5_root /public/share/acd7koea4a/hdf5 \
+    --hdf5_root /public/home/acd7koea4a/hdf5_norm_fp16 \
     --seasons MAM JJA SON DJF \
     --manifests cra1p5_full \
     --val_fraction 0.2 \
@@ -241,7 +241,7 @@ PY
 LOG=logs/full_single_$(date +%Y%m%d_%H%M%S).log
 
 python -u train.py \
-    --hdf5_root /public/share/acd7koea4a/hdf5 \
+    --hdf5_root /public/home/acd7koea4a/hdf5_norm_fp16 \
     --seasons MAM JJA SON DJF \
     --manifests cra1p5_full \
     --val_fraction 0.2 \
@@ -295,9 +295,9 @@ tail -f /public/home/acd7koea4a/work/logs/full_ddp_*.log
 ```bash
 python infer.py --ckpt runs/exp_prod_ddp_4gpu/checkpoints/best.pt \
     --auto_model_cfg --use_ema \
-    --hdf5_root /public/share/acd7koea4a/hdf5 --seasons DJF \
+    --hdf5_root /public/home/acd7koea4a/hdf5_norm_fp16 --seasons DJF \
     --out_dir infer_out_prod --output_mode per_sample --output_format nc \
-    --output_space physical --amp_bf16
+    --lon_convention neg180_180 --output_space physical --amp_bf16
 ```
 
 `--auto_model_cfg` 会从 checkpoint 识别 `use_cbam=False`、`hr_aux_mode=stage1`、`norm_type=group`。开了 EMA 时加 `--use_ema`，用 `model_ema` 而不是在线权重。
@@ -339,6 +339,6 @@ python infer.py --ckpt runs/exp_prod_ddp_4gpu/checkpoints/best.pt \
 | 更完整的分析与消融 | `/public/home/acd7koea4a/work/TRAINING_ANALYSIS.md` |
 | 损失定案 | `/public/home/acd7koea4a/work/loss_plan/final_decision.md` |
 | 冒烟数据 | `/public/home/acd7koea4a/work/smoke_test_data` |
-| 正式 HDF5 | `/public/share/acd7koea4a/hdf5` |
+| 正式 HDF5 | `/public/home/acd7koea4a/hdf5_norm_fp16`（fp32 备份：`/public/share/acd7koea4a/hdf5`） |
 | 单卡冒烟日志 | `logs/smoke_cra1p5_full_0038_20260912_193344.log` |
 | 2 卡冒烟日志 | `logs/smoke_ddp_cra1p5_full_0038_20260912_194201.log` |

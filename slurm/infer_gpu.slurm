@@ -35,6 +35,7 @@ python -u infer.py \
     --out_dir "${OUT_DIR}" \
     --output_mode per_sample \
     --output_format nc \
+    --lon_convention neg180_180 \
     --output_space physical \
     --amp_bf16 \
     --auto_model_cfg

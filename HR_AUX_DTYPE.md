@@ -151,6 +151,6 @@ GPU/ROCm 上复核第 4 节那组组合（CPU autocast 与 CUDA/ROCm 路径不�
 | `dataset.py` | 可选：返回前 `hr_aux.to(bfloat16)`；numpy concat 保持 fp32 |
 | `train.py` | 一般不用改；冒烟时打印/断言 dtype |
 | `scripts/smoke_norm_fp16_step.py` | 增加 `hr_aux` 与 `cat` 后 dtype 检查 |
-| `DOWNSCALE_README.md` / `TRAINING_ANALYSIS.md` | 改完后同步出口 dtype |
+| `DOWNSCALE_README.md` | 改完后同步出口 dtype |
 
 本次预标准化 fp16 改造**不包含**上表改动。`paths.HDF5_ROOT` 切换与否也与本节无关。

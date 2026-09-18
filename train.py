@@ -1,7 +1,7 @@
 """
 PixelShuffleDownscaleNet 模型训练脚本。
 
-  - 损失函数（v2，"参考目标 + 风光增量项"解耦设计，见 loss_plan/final_decision.md，
+  - 损失函数（v2，"参考目标 + 风光增量项"解耦设计，见 DOWNSCALE_README.md 第 5 节，
     组合损失，可逐项开关）：
       面积加权 TailWeightedMAE（参考目标）+ PatchExtremeLoss + WindPowerSensitivityProxy
       + PhysicalConsistencyLoss（+ 旧版 SpatialExtremeLoss/FFT/Gradient Loss，默认关闭，供对照）
@@ -15,7 +15,7 @@ PixelShuffleDownscaleNet 模型训练脚本。
         与 LR 输入同分辨率近似对齐），约束局部 max/min/mean 一致——取代旧版
         SpatialExtremeLoss 的全球单一极值约束。patch-mean 只约束一阶矩，抑制为
         凑 max 而整体平移的退化解，**不约束极值位置**；确定性回归下可能以抬高
-        整块换极值统计（见 loss_plan/final_decision.md 第 11.4、11.5 节）
+        整块换极值统计（见 DOWNSCALE_README.md 第 5 节）
       · WindPowerSensitivityProxy（--lambda_wps，默认 0.05）：仅对 wind10，在物理
         量纲的风机爬坡段（--wind_cutin 3–--wind_rated 12 m/s）内约束归一化功率
         代理一致。mask 不含额定以上高风速（由 tail + PatchExtreme 监督）。
@@ -155,7 +155,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import DownscaleDataset, VARIABLES
 
-# PRE 在写入 HDF5 前做了 log1p 变换（见 dataset.py / DOWNSCALE_README.md 第1节），
+# PRE 在写入 HDF5 前做了 log1p 变换（见 dataset.py / DOWNSCALE_README.md 第 2 节），
 # 因此 z-score 反标准化后的 PRE 仍处于 log1p(mm/day) 空间，并非真实降水量纲。
 # MAE_val/PRE 实际是 log1p 空间的误差，容易被误读为"物理精度"；validate() 中额外
 # 对 PRE 通道做一次 expm1，计算 MAE_val_physical/PRE（mm/day，真实物理量纲）作为
@@ -311,7 +311,7 @@ class _NoOpWriter:
 def _load_area_weight_hr(static_dir: str | Path, target_h: int = 1801) -> torch.Tensor:
     """按纬度计算 cos(lat) 球面积权重，归一化到均值=1，用于训练损失的面积校正。
 
-    背景（面向发表级评估的已知问题，见 loss_plan/final_decision.md 第 0.1 节）：
+    背景（面向发表级评估的已知问题，见 DOWNSCALE_README.md 第 5 节）：
     规则经纬网格在高纬度单位像素代表的真实地表面积远小于赤道附近，像素等权的
     损失/评估会系统性放大高纬度（尤其极区）的权重。归一化到均值=1，保证叠加
     该权重后训练损失的整体量级不变（只改变像素间的相对权重分布），不影响与
@@ -479,7 +479,7 @@ class SpatialExtremeLoss(nn.Module):
 
 
 class PatchExtremeLoss(nn.Module):
-    """局部 patch 极值一致性损失（升级版 SpatialExtremeLoss，见 loss_plan/final_decision.md）。
+    """局部 patch 极值一致性损失（升级版 SpatialExtremeLoss，见 DOWNSCALE_README.md 第 5 节）。
 
     把"全球单一 max/min 标量"换成滑动网格局部 max/min/mean 场的一致性约束：
     对 --patch_extreme_vars 指定通道，把 HR 场 (H, W) 划分为 (grid_h, grid_w) 个
@@ -497,8 +497,7 @@ class PatchExtremeLoss(nn.Module):
          与主 MAE 也高度相关（patch 平均误差是逐点 MAE 的低通版本）。
       3. 确定性回归的内在张力：模型不知道次网格极值在哪，降低 L1(patch_max)
          的省力解往往是抬高整块，可能以逐点 MAE/偏差换极值统计。λ 偏大时
-         冒烟应看 wind10/FSDS 的 patch 均值偏差（见 loss_plan/final_decision.md
-         第 11.4、11.5 节）。
+         冒烟应看 wind10/FSDS 的 patch 均值偏差（见 DOWNSCALE_README.md 第 5 节）。
 
     网格大小默认 (180, 360)：与 LR 输入网格**同分辨率近似对齐**（措辞：
     `adaptive_max_pool2d` 按张量下标均匀切分，不是真实球面 lat/lon 单元的
@@ -538,7 +537,7 @@ class PatchExtremeLoss(nn.Module):
 
 class WindPowerSensitivityProxy(nn.Module):
     """风功率敏感区代理损失（非能量产出对齐，命名与局限性务必对照
-    loss_plan/final_decision.md 第 2.3 节阅读，不要在论文中单独脱离这些
+    DOWNSCALE_README.md 第 5 节阅读，不要在论文中单独脱离这些
     局限性引用本损失得出发电量/容量因子结论）。
 
     仅对 wind10 通道，在物理量纲（反标准化后）的风机"爬坡段"
@@ -574,7 +573,7 @@ class WindPowerSensitivityProxy(nn.Module):
     诊断口径：forward 额外返回 mask 覆盖像素比例。损失值量级不能代表该项
     对参数的梯度贡献（dP/dv ∝ 3v²，爬坡段内可差一个量级以上）；隔离梯度
     范数不是训练默认行为，仅建议在冒烟阶段对 head 末层另算（见
-    loss_plan/final_decision.md 第 11.2、11.3 节）。
+    DOWNSCALE_README.md 第 5 节）。
 
     Args:
         wind_idx:  wind10 在 VARIABLES 中的通道下标
@@ -619,9 +618,9 @@ class WindPowerSensitivityProxy(nn.Module):
 class PhysicalConsistencyLoss(nn.Module):
     """物理一致性安全网损失：仅依赖预测本身（不需要真值）。
 
-    **必须先反标准化，禁止在 z 空间直接写 hinge**（ques.md 第 1 条曾担心的
-    失败模式：TMIN_z≤TAS_z 与物理顺序不等价；ReLU(−wind_z) 会惩罚低于全球
-    平均风速的像素；RH−100 会把物理常数混进 z 空间）。当前实现顺序：
+    **必须先反标准化，禁止在 z 空间直接写 hinge**（失败模式：TMIN_z≤TAS_z
+    与物理顺序不等价；ReLU(−wind_z) 会惩罚低于全球平均风速的像素；RH−100
+    会把物理常数混进 z 空间）。当前实现顺序：
 
       1. x_phys = pred · σ + μ（各通道独立；PRE 还原后仍是 log1p 空间，
          log1p(PRE)≥0 等价于物理降水 ≥0）
@@ -636,7 +635,7 @@ class PhysicalConsistencyLoss(nn.Module):
 
     权重应设得很小（安全网，不追求强约束）；训练收敛后各项违反率应自然趋近 0。
     多数像素 hinge=0 时损失均值很小，但违反像素上梯度是常数 1/σ，损失值
-    ±3× 不能代表该项梯度贡献（见 loss_plan/final_decision.md 第 11.2 节）。
+    ±3× 不能代表该项梯度贡献（见 DOWNSCALE_README.md 第 5 节）。
 
     Args:
         norm_mean, norm_std: 全 8 通道的 z-score 反标准化统计量，形状 (8,)
@@ -693,7 +692,7 @@ class PhysicalConsistencyLoss(nn.Module):
 
 
 class CombinedLoss(nn.Module):
-    """训练用组合损失（v2，见 loss_plan/final_decision.md）：面积加权
+    """训练用组合损失（v2，见 DOWNSCALE_README.md 第 5 节）：面积加权
     TailWeightedMAE（参考目标） + λ_pe·PatchExtremeLoss + λ_wps·
     WindPowerSensitivityProxy + λ_phys·PhysicalConsistencyLoss，另保留旧版
     λ_e·SpatialExtremeLoss + λ_f·FFTLoss + λ_g·GradientLoss（默认关闭，供对照
@@ -703,7 +702,7 @@ class CombinedLoss(nn.Module):
     lambda_patch_extreme=lambda_wps=lambda_phys=0，gamma=0，channel_weight/
     area_weight 均为 None）时，与 nn.L1Loss() 完全等价。
 
-    **退化说明（措辞已按外部评审修正，见 final_decision.md 第 1 节）**：这只
+    **退化说明（措辞已按外部评审修正，见 DOWNSCALE_README.md 第 5 节）**：这只
     保证损失函数**数值**的退化，不构成"训练出的模型在其余变量上必然不退步"
     的形式化证明——是否退步需要看实际验证集结果。
 
@@ -913,7 +912,7 @@ def build_scheduler(
 
 # ---------------------------------------------------------------------------
 # Resource checkpoint baseline（修复 best_resource.pt 的量纲问题，见
-# loss_plan/final_decision.md 第 3 节）
+# DOWNSCALE_README.md 第 6 节）
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
@@ -930,7 +929,7 @@ def compute_baseline_resource_mae(
     修复的问题：原实现把 wind10（m/s）与 FSDS（W/m²）的物理量纲 MAE 直接算术
     平均作为"资源最优"判据——两个不同物理量纲的数值不可加，且量纲更大的一方
     会系统性主导结果，不能解释为"资源最优"（外部评审指出，核实后确认是当前
-    代码库既有缺陷，见 final_decision.md 第 0.1 节）。
+    代码库既有缺陷，见 DOWNSCALE_README.md 第 6 节）。
 
     x_lr 与 y_hr 用同一组全局 mean/std 做 z-score（dataset.py 已确认一致），
     因此 baseline 反标准化用与验证时相同的 norm_mean/std 即可，不需要额外统计量。
@@ -1014,7 +1013,7 @@ def validate(
     **不**叠加 area_weight（外部评审建议过"验证指标同步面积加权"，但与本项目
     "Loss/val 必须与历史 run 严格可比"的既有原则冲突，权衡后保留 Loss/val 不变，
     面积加权版本作为下方的新增诊断指标 MAE_val_area_weighted/* 单独提供，
-    见 final_decision.md q11 的范围确认）。
+    见 DOWNSCALE_README.md 第 6 节）。
 
     resource_metric：`resource_var_indices` 指定变量的 **skill score** 均值
     （`1 − MAE_model_var / MAE_baseline_var`，`MAE_baseline_var` 来自
@@ -1195,7 +1194,7 @@ def validate(
                   f"extreme_mae={extreme_val:.4f} (n_pix={int(n_extreme)})")
 
     # resource_metric：skill score 均值（修复量纲错误算术平均，见
-    # compute_baseline_resource_mae() 文档与 final_decision.md 第 3 节）。
+    # compute_baseline_resource_mae() 文档与 DOWNSCALE_README.md 第 6 节）。
     # >0 表示优于"LR 双线性插值"这个 naive baseline；数值越大越好（与旧版
     # "resource_metric 越小越好"的方向相反，main() 中 best_resource_val 的
     # 初值与比较方向已同步反转）。
@@ -1498,7 +1497,7 @@ def parse_args() -> argparse.Namespace:
             "ResBlock/InitConv/Head 的归一化层类型（默认 batch=nn.BatchNorm2d，与历史版本"
             "一致）。group=nn.GroupNorm，按通道分组在单样本内部统计，不依赖 batch 维，"
             "对 --batch_size 较小（尤其单卡/单进程 batch=1）场景更稳健，避免 BN 统计噪声"
-            "导致的 loss 抖动（见 DOWNSCALE_README.md 第7节）；代价是与 'batch' 版本的 "
+            "导致的 loss 抖动（见 DOWNSCALE_README.md 第 4 节）；代价是与 'batch' 版本的 "
             "checkpoint 不兼容（层结构不同），需从头训练。分布式下 --sync_bn 仅对 "
             "norm_type=batch 生效（GroupNorm 本身不依赖跨进程同步）。"
         ),
@@ -1580,7 +1579,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "TailWeightedMAE 的逐变量（通道）固定权重，格式为 'VAR=weight' 逗号分隔，"
             "键必须属于 VARIABLES（见 dataset.py）。与 z-score 尾部权重相乘叠加。"
-            "v2 默认改为全 1（等权'参考目标'，见 loss_plan/final_decision.md）："
+            "v2 默认改为全 1（等权'参考目标'，见 DOWNSCALE_README.md 第 5 节）："
             "旧版默认对 wind10/FSDS/TAS/2M_RH 做固定偏置加权，本质是在全部 8 通道间"
             "做零和式梯度再分配（抬风光的同时压低其余变量的梯度预算），与"
             "'各变量同时变好、风光资源改进完全由独立增量项负责'的设计原则冲突，"
@@ -1644,7 +1643,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "PatchExtremeLoss 权重（v2 默认 0.1，与旧版 --lambda_extreme 的历史"
             "默认值同量级，作为起点，正式训练前建议先过一次数量级校验，见"
-            "loss_plan/final_decision.md 第 4 节）。对 --patch_extreme_vars 指定"
+            "DOWNSCALE_README.md 第 5 节）。对 --patch_extreme_vars 指定"
             "的通道，把 HR 场划分为 (--patch_grid_h, --patch_grid_w) 个局部网格块，"
             "逐块约束预测/目标的局部 max、min、mean 一致。patch-mean 只约束一阶矩，"
             "抑制为凑 max 而整体平移的退化解，不约束极值位置；λ 偏大时可能用抬高"
@@ -1823,7 +1822,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "分布式训练时默认将模型中的 BatchNorm 转为 SyncBatchNorm（跨所有进程同步 "
             "batch 统计量），缓解 --batch_size 1 时单进程 BN 统计噪声大的问题（见 "
-            "DOWNSCALE_README.md 第 7 节）。传本参数关闭该转换（单卡运行时无影响）。"
+            "DOWNSCALE_README.md 第 4 节）。传本参数关闭该转换（单卡运行时无影响）。"
         ),
     )
     p.set_defaults(sync_bn=True)
@@ -1984,7 +1983,7 @@ def main() -> None:
     if is_distributed and args.sync_bn and device.type == "cuda" and args.norm_type == "batch":
         # SyncBatchNorm 仅支持 GPU 模块 + BatchNorm；CPU-only 调试环境或 norm_type=group
         # 自动跳过（GroupNorm 按通道分组在单样本内部统计，不依赖 batch 维，无需跨进程同步）。
-        # batch_size=1 时单进程 BN 统计噪声大（见 DOWNSCALE_README.md 第 7 节），
+        # batch_size=1 时单进程 BN 统计噪声大（见 DOWNSCALE_README.md 第 4 节），
         # SyncBatchNorm 用所有进程的样本联合估计 mean/var，缓解该问题；
         # 转换须在 .to(device) 之后、DDP 包装之前进行
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)

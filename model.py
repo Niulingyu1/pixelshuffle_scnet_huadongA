@@ -57,7 +57,7 @@ from torch.utils.checkpoint import checkpoint as grad_ckpt
 # 归一化层工厂：BatchNorm2d（默认，与历史版本一致）或 GroupNorm（--norm_type group）
 # ---------------------------------------------------------------------------
 # BatchNorm2d 依赖 batch 维统计量，--batch_size 1 时统计噪声大（见 DOWNSCALE_README.md
-# 第7节）；GroupNorm 按通道分组在单样本内部统计，不依赖 batch 维，对小 batch 更稳健，
+# 第 4 节）；GroupNorm 按通道分组在单样本内部统计，不依赖 batch 维，对小 batch 更稳健，
 # 代价是与 BatchNorm 版本的 checkpoint 不兼容（层类型不同），需从头训练。
 
 def _num_groups(channels: int, target: int = 32) -> int:

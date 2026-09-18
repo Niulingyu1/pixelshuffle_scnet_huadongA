@@ -3,6 +3,8 @@
 日期：2026-09-18  
 目的：训练可以读预标准化 fp16；**推理必须继续读「训练域物理量 + 在线 z-score」**。两边必须共用同一份统计量、同一套变换顺序，否则会出现静默错结果（重复 z-score / 重复 log1p），很难从 loss 曲线看出来。
 
+训练命令与平台注意事项见 [`DOWNSCALE_README.md`](DOWNSCALE_README.md) 第 1 节。本文只约束目录分工与变换顺序，不要把推理指到训练用的 `hdf5_norm_fp16`。
+
 相关代码：`dataset.py`（`_load_norm_stats`、`stats_content_sha256`、`is_pre_normalized_shard`）、`normalize_hdf5_fp16.py`、`infer.py`（`_prep_norm_tensors`、HDF5 护栏）、`train.py`（`get_norm_stats` 反标准化）、`prepare_hdf5_cesm.py`。
 
 ---
@@ -75,7 +77,7 @@ HDF5 存储单位（训练域）
    `该目录是预标准化数据...会静默二次标准化`  
    而不是跑出看起来正常的 NetCDF。
 
-正确示例（与 `DOWNSCALE_README.md` 第 8 节一致）：
+正确示例（与 `DOWNSCALE_README.md` 第 9 节一致）：
 
 ```bash
 python infer.py \

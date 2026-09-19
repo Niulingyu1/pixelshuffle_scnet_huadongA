@@ -4,8 +4,10 @@
 #
 # 现行配置（DOWNSCALE_README.md 第 1、4 节应与本脚本一致，不要反过来对齐 slurm）：
 #   架构：--no_cbam --hr_aux_mode stage1 --norm_type group --ema_decay 0.999
-#   损失：train.py v2 默认（面积加权 TailMAE + PatchExtreme 0.1 + WPS 0.05 + Phys 0.02）
-#   调参：--warmup_ratio 0.03 --val_interval 2
+#   损失：面积加权 TailMAE + PatchExtreme 0.1 + WPS 0.05 + Phys 0.06
+#         （Phys 相对 train.py argparse 默认 0.02 上调，让 TMIN≤TAS≤TMAX 等
+#         hinge 安全网真正获得可用梯度；其余 λ 与 train.py v2 默认一致）
+#   调参：--warmup_ratio 0.03 --val_interval 2 --early_stop_min_delta 1e-4
 #   8 卡保持 --batch_size 1；不要提到 2
 #   数据：paths.HDF5_ROOT（hdf5_norm_fp16）+ --manifests cra1p5_full
 #
@@ -14,7 +16,8 @@
 #     bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh
 #
 # 平台注入 WORLD_SIZE/RANK/MASTER_*（语义是实例数，不是卡数）。
-# NPROC_PER_NODE 必须与「每实例加速卡数量」一致（默认 8；2 卡时 export NPROC_PER_NODE=2）。
+# torchrun --nproc_per_node 默认跟容器可见卡数走（=控制台「每实例加速卡数量」），不必再 export。
+# 只有故意少用卡时才 export NPROC_PER_NODE。
 #
 # 预标准化数据冒烟：scripts/launch_platform_smoke_norm_single.sh / smoke_norm_ddp.sh
 # 全量 1 epoch 探测：scripts/launch_platform_train_copy.sh
@@ -37,7 +40,9 @@ echo "HDF5_ROOT=${HDF5_ROOT}"
 ls "${HDF5_ROOT}" >/dev/null || { echo "错误: HDF5_ROOT 不可访问，请检查挂载/路径配置" >&2; exit 1; }
 
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+if [[ -z "${NPROC_PER_NODE:-}" ]]; then
+    NPROC_PER_NODE="$(python -c 'import torch; print(max(int(torch.cuda.device_count()), 1))')"
+fi
 
 echo "WORLD_SIZE=${WORLD_SIZE:-1} RANK=${RANK:-0} MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} " \
      "MASTER_PORT=${MASTER_PORT:-23456} NPROC_PER_NODE=${NPROC_PER_NODE}"
@@ -63,5 +68,7 @@ torchrun \
     --norm_type group \
     --ema_decay 0.999 \
     --warmup_ratio 0.03 \
+    --lambda_phys 0.06 \
     --early_stop_patience 20 \
+    --early_stop_min_delta 1e-4 \
     --run_dir runs/exp_prod_ddp_platform

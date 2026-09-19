@@ -9,7 +9,7 @@
 # 启动命令：
 #   bash /public/home/acd7koea4a/work/scripts/launch_platform_train_copy.sh
 #
-# NPROC_PER_NODE 须与控制台「每实例加速卡数量」一致（默认 2）。
+# torchrun --nproc_per_node 默认跟容器可见卡数走，不必再 export。
 
 set -euo pipefail
 
@@ -24,7 +24,9 @@ echo "HDF5_ROOT=${HDF5_ROOT}"
 ls "${HDF5_ROOT}" >/dev/null || { echo "错误: HDF5_ROOT 不可访问，请检查挂载/路径配置" >&2; exit 1; }
 
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+if [[ -z "${NPROC_PER_NODE:-}" ]]; then
+    NPROC_PER_NODE="$(python -c 'import torch; print(max(int(torch.cuda.device_count()), 1))')"
+fi
 
 echo "WORLD_SIZE=${WORLD_SIZE:-1} RANK=${RANK:-0} MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} " \
      "MASTER_PORT=${MASTER_PORT:-23456} NPROC_PER_NODE=${NPROC_PER_NODE}"

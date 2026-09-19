@@ -10,6 +10,7 @@
 #     bash /public/home/acd7koea4a/work/scripts/launch_platform_smoke_norm_ddp.sh
 #
 # 多卡：保留平台注入的 WORLD_SIZE/RANK/MASTER_*，不要 unset。
+# --nproc_per_node 默认跟可见卡数走（控制台填 2 卡即可），不必再 export。
 
 set -euo pipefail
 
@@ -17,11 +18,14 @@ WORK_ROOT="/public/home/acd7koea4a/work"
 cd "${WORK_ROOT}"
 mkdir -p logs runs
 
-NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+if [[ -z "${NPROC_PER_NODE:-}" ]]; then
+    NPROC_PER_NODE="$(python -c 'import torch; print(max(int(torch.cuda.device_count()), 1))')"
+fi
+export NPROC_PER_NODE
 
 python - <<PY
 import os, sys, torch
-nproc = int(os.environ.get("NPROC_PER_NODE", "${NPROC_PER_NODE}"))
+nproc = int(os.environ["NPROC_PER_NODE"])
 print("python:", sys.executable)
 print("torch:", torch.__version__)
 print("cuda_available:", torch.cuda.is_available(), "count:", torch.cuda.device_count())
@@ -34,7 +38,7 @@ if not torch.cuda.is_available():
 if torch.cuda.device_count() < nproc:
     raise SystemExit(
         f"可见卡数 {torch.cuda.device_count()} < NPROC_PER_NODE={nproc}，"
-        "请把控制台「每实例加速卡数量」改成 2"
+        "请把控制台「每实例加速卡数量」改成与 NPROC_PER_NODE 一致，或不要 export 更大的值"
     )
 for i in range(torch.cuda.device_count()):
     print(f"  [{i}]", torch.cuda.get_device_name(i))

@@ -2,7 +2,7 @@
 
 训练相关说明已合并到本文。命令与注意事项见 **第 1 节**。
 
-刻意单独保留、改脚本前先读：
+改脚本前先读：
 
 - [`TRAIN_INFER_NORM.md`](TRAIN_INFER_NORM.md) — 训练/推理标准化契约（禁止二次 z-score / 二次 log1p）
 - [`HR_AUX_DTYPE.md`](HR_AUX_DTYPE.md) — `hr_aux` 与 bf16 特征拼接的 dtype 约定（本次不改代码）
@@ -18,22 +18,24 @@
 正式长跑只走 SCNet「模型训练」控制台，**不要** `sbatch` / `slurm/*.slurm`。裸跑 `python train.py` 会落到代码默认架构（CBAM 开、`hr_aux=all`、BatchNorm、无 EMA），不要当正式训练。
 
 | 用途 | 控制台启动命令 |
+
 | --- | --- |
-| **正式 100 epoch（唯一入口）** | `bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh` |
-| 预标准化数据单卡冒烟（1 shard） | `bash scripts/launch_platform_smoke_norm_single.sh` |
-| 预标准化数据 2 卡 DDP 冒烟 | `bash scripts/launch_platform_smoke_norm_ddp.sh` |
-| 全量 1 epoch 探测（读盘 / 显存 / `validate()` / 落盘） | `bash scripts/launch_platform_train_copy.sh` |
-| 8 卡短跑（2 epoch） | `bash scripts/launch_platform_short_8gpu.sh` |
+| **正式 100 epoch（唯一入口）** | `bash /public/home/acd7koea4a/work/scripts/launch_platform_train.sh 2>&1 | tee /public/home/acd7koea4a/work/logs/train_$(date +%Y%m%d_%H%M%S).log` |
+
+| 预标准化数据单卡冒烟（1 shard） | `bash /public/home/acd7koea4a/work/scripts/launch_platform_smoke_norm_single.sh` |
+| 预标准化数据 2 卡 DDP 冒烟 | `bash /public/home/acd7koea4a/work/scripts/launch_platform_smoke_norm_ddp.sh` |
+| 全量 1 epoch 探测（读盘 / 显存 / `validate()` / 落盘） | `bash /public/home/acd7koea4a/work/scripts/launch_platform_train_copy.sh 2>&1 \| tee logs/probe_$(date +%Y%m%d_%H%M%S).log` |
+| 8 卡短跑（2 epoch） | `bash /public/home/acd7koea4a/work/scripts/launch_platform_short_8gpu.sh` |
 | A800 小集单卡/2 卡冒烟 | `scripts/launch_platform_smoke_single.sh` / `smoke_ddp.sh` |
 | 正式配置单卡吞吐基准 | `scripts/launch_platform_train_single_gpu_benchmark.sh` |
 | 历史纯 MAE 对齐（`hr_aux=none`，非正式） | `scripts/launch_platform_train_bw_a800_aligned_benchmark.sh` |
 
 推荐顺序：`smoke_norm_single` → `smoke_norm_ddp` → `train_copy`（1 epoch）→ `launch_platform_train.sh`（100 epoch）。冒烟只验管线，16 样本上的 MAE 没有业务意义。
 
-脚本内部等价命令（`NPROC_PER_NODE` 必须等于控制台「每实例加速卡数量」，默认 8）：
+脚本内部等价命令。`--nproc_per_node` 默认等于容器可见卡数（控制台「每实例加速卡数量」），**不必再 `export NPROC_PER_NODE`**：
 
 ```bash
-torchrun --nnodes="${WORLD_SIZE:-1}" --nproc_per_node="${NPROC_PER_NODE:-8}" \
+torchrun --nnodes="${WORLD_SIZE:-1}" --nproc_per_node="${NPROC_PER_NODE}" \
     --node_rank="${RANK:-0}" --master_addr="${MASTER_ADDR:-127.0.0.1}" \
     --master_port="${MASTER_PORT:-23456}" \
     train.py \
@@ -46,7 +48,7 @@ torchrun --nnodes="${WORLD_SIZE:-1}" --nproc_per_node="${NPROC_PER_NODE:-8}" \
     --run_dir runs/exp_prod_ddp_platform
 ```
 
-损失不传参，走 `train.py` v2 默认。2 卡时先 `export NPROC_PER_NODE=2`。
+损失不传参，走 `train.py` v2 默认。控制台改卡数即可，脚本会按 `torch.cuda.device_count()` 起同样多的进程。
 
 ### 1.2 控制台怎么填
 
@@ -54,11 +56,11 @@ torchrun --nnodes="${WORLD_SIZE:-1}" --nproc_per_node="${NPROC_PER_NODE:-8}" \
 | --- | --- |
 | 入口 | 人工智能服务 → 模型训练 → 创建训练任务 |
 | 加速卡 | BW1000 用 **DTK PyTorch**；A800 用 **CUDA PyTorch**（两边不要混用镜像） |
-| 每实例卡数 | 正式 8（可先 4）；必须与 `NPROC_PER_NODE` 一致 |
+| 每实例卡数 | 正式 8（可先 2/4）；脚本按可见卡数自动设 `torchrun --nproc_per_node` |
 | 实例数 | 1（单节点通了再考虑多实例） |
 | 启动命令 | 上表对应脚本 |
 
-平台注入的 `WORLD_SIZE` / `RANK` 是**实例数**，不是卡数。`nproc_per_node` 才是每实例卡数。
+平台注入的 `WORLD_SIZE` / `RANK` 是**实例数**，不是卡数。每实例进程数由脚本按可见卡数设置，不用再手写。
 
 ### 1.3 注意事项（硬约束）
 
@@ -88,10 +90,13 @@ torchrun --nnodes="${WORLD_SIZE:-1}" --nproc_per_node="${NPROC_PER_NODE:-8}" \
 - `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True` 在本 DCU 平台不支持，不要靠它救命。
 - **禁止** `infer.py --hdf5_root .../hdf5_norm_fp16`。推理契约见 `TRAIN_INFER_NORM.md`。
 
+训练需要挂载/public/share/acd7koea4a/
+
+
 ### 1.4 提交前清单
 
 - [ ] 启动命令是 `launch_platform_train.sh`，不是 `sbatch`
-- [ ] `NPROC_PER_NODE` = 「每实例加速卡数量」；8 卡 `--batch_size 1`
+- [ ] 控制台「每实例加速卡数量」已设好；8 卡 `--batch_size 1`。不必再 export `NPROC_PER_NODE`
 - [ ] BW1000 不要 `source env/activate.sh`
 - [ ] 冒烟 / 1 epoch 探测已通过
 - [ ] 损失走 v2 默认；选模型看 `Loss/val` / `best.pt`；看降水看 `MAE_val_physical/PRE`
